@@ -1,0 +1,268 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {PoliticianVault} from "./PoliticianVault.sol";
+import {UserVault} from "./UserVault.sol";
+import {VaultRegistry} from "./VaultRegistry.sol";
+import {FeeManager} from "./FeeManager.sol";
+import {IBaseVault} from "../interfaces/IBaseVault.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
+/// @title VaultFactory
+/// @notice Factory for creating PoliticianVaults (permissioned) and UserVaults (permissionless).
+///         Uses direct deployment. Registers all vaults in VaultRegistry.
+contract VaultFactory is Ownable {
+    using SafeERC20 for IERC20;
+
+    // --- Immutables / Config ---
+    address public baseAsset; // USDC or main deposit token
+    FeeManager public feeManager;
+    VaultRegistry public registry;
+    address public rebalanceEngine;
+    address public defaultOracle; // for politician vaults
+
+    // --- Permissionless config ---
+    uint256 public vaultCreationFee; // flat ETH fee for user vault creation
+    uint256 public minSeedDeposit; // minimum curator seed deposit
+    uint256 public defaultTimeLock; // default time-lock for weight changes (24h)
+    uint256 public defaultMinRebalanceInterval; // default min rebalance interval (4h)
+
+    // --- Token whitelist ---
+    mapping(address => bool) public approvedTokens;
+    address[] public approvedTokenList;
+
+    // --- Tracking ---
+    address[] public allVaults;
+    mapping(address => bool) public isVault;
+
+    // --- Events ---
+    event PoliticianVaultCreated(
+        address indexed vault, bytes32 indexed politicianId, string name, string symbol
+    );
+    event UserVaultCreated(
+        address indexed vault, address indexed curator, string name, string symbol
+    );
+    event TokenApprovalUpdated(address indexed token, bool approved);
+    event CreationFeeUpdated(uint256 newFee);
+    event MinSeedDepositUpdated(uint256 newMin);
+    event DefaultOracleUpdated(address indexed oracle);
+    event RebalanceEngineUpdated(address indexed engine);
+
+    // --- Errors ---
+    error InsufficientCreationFee();
+    error InsufficientSeedDeposit();
+    error TokenNotApproved();
+    error InvalidWeights();
+    error ZeroAddress();
+
+    constructor(
+        address _baseAsset,
+        address _feeManager,
+        address _registry,
+        address _rebalanceEngine,
+        address _defaultOracle
+    ) Ownable(msg.sender) {
+        require(_baseAsset != address(0), "VaultFactory: zero base asset");
+        baseAsset = _baseAsset;
+        feeManager = FeeManager(payable(_feeManager));
+        registry = VaultRegistry(_registry);
+        rebalanceEngine = _rebalanceEngine;
+        defaultOracle = _defaultOracle;
+
+        vaultCreationFee = 0.01 ether;
+        minSeedDeposit = 100e6; // 100 USDC (6 decimals)
+        defaultTimeLock = 24 hours;
+        defaultMinRebalanceInterval = 4 hours;
+    }
+
+    // ===================== Admin =====================
+
+    function setApprovedToken(address token, bool approved) external onlyOwner {
+        approvedTokens[token] = approved;
+        if (approved) {
+            approvedTokenList.push(token);
+        }
+        emit TokenApprovalUpdated(token, approved);
+    }
+
+    function setApprovedTokensBatch(address[] calldata tokens, bool approved) external onlyOwner {
+        for (uint256 i = 0; i < tokens.length; i++) {
+            approvedTokens[tokens[i]] = approved;
+            if (approved) {
+                approvedTokenList.push(tokens[i]);
+            }
+            emit TokenApprovalUpdated(tokens[i], approved);
+        }
+    }
+
+    function setCreationFee(uint256 _fee) external onlyOwner {
+        vaultCreationFee = _fee;
+        emit CreationFeeUpdated(_fee);
+    }
+
+    function setMinSeedDeposit(uint256 _min) external onlyOwner {
+        minSeedDeposit = _min;
+        emit MinSeedDepositUpdated(_min);
+    }
+
+    function setDefaultOracle(address _oracle) external onlyOwner {
+        defaultOracle = _oracle;
+        emit DefaultOracleUpdated(_oracle);
+    }
+
+    function setRebalanceEngine(address _engine) external onlyOwner {
+        rebalanceEngine = _engine;
+        emit RebalanceEngineUpdated(_engine);
+    }
+
+    function setDefaultTimeLock(uint256 _timeLock) external onlyOwner {
+        defaultTimeLock = _timeLock;
+    }
+
+    function setDefaultMinRebalanceInterval(uint256 _interval) external onlyOwner {
+        defaultMinRebalanceInterval = _interval;
+    }
+
+    // ===================== Permissioned: Politician Vaults =====================
+
+    /// @notice Create a politician vault (admin only)
+    function createPoliticianVault(
+        bytes32 politicianId,
+        string calldata name,
+        string calldata symbol,
+        address oracle,
+        string calldata metadataURI
+    ) external onlyOwner returns (address vault) {
+        address oracleAddr = oracle != address(0) ? oracle : defaultOracle;
+        require(oracleAddr != address(0), "VaultFactory: no oracle");
+
+        PoliticianVault pVault = new PoliticianVault(
+            name,
+            symbol,
+            politicianId,
+            baseAsset,
+            oracleAddr,
+            address(feeManager),
+            rebalanceEngine,
+            msg.sender
+        );
+
+        vault = address(pVault);
+        _registerVault(vault);
+
+        // Configure fees: 0% curator share for politician vaults
+        feeManager.configureVaultFees(vault, 0, address(0));
+
+        // Register in registry
+        registry.registerVault(vault, VaultRegistry.VaultType.POLITICIAN, address(0), metadataURI);
+
+        emit PoliticianVaultCreated(vault, politicianId, name, symbol);
+    }
+
+    // ===================== Permissionless: User Vaults =====================
+
+    /// @notice Create a user vault (anyone can call)
+    /// @param name Vault name (e.g., "Tech Growth Strategy")
+    /// @param symbol Vault share symbol (e.g., "vTECH")
+    /// @param tokens Initial token addresses for the portfolio
+    /// @param weights Initial weights in basis points (must sum to 10000)
+    /// @param curatorFeeBps Curator's share of fees in basis points (max 8000 = 80%)
+    /// @param seedDeposit Amount of base asset to seed the vault with
+    /// @param metadataURI IPFS URI for vault description/avatar
+    function createUserVault(
+        string calldata name,
+        string calldata symbol,
+        address[] calldata tokens,
+        uint16[] calldata weights,
+        uint16 curatorFeeBps,
+        uint256 seedDeposit,
+        string calldata metadataURI
+    ) external payable returns (address vault) {
+        // Validate creation fee
+        if (msg.value < vaultCreationFee) revert InsufficientCreationFee();
+
+        // Validate seed deposit
+        if (seedDeposit < minSeedDeposit) revert InsufficientSeedDeposit();
+
+        // Validate tokens and weights
+        require(tokens.length == weights.length, "VaultFactory: length mismatch");
+        require(tokens.length > 0, "VaultFactory: empty portfolio");
+
+        uint256 totalBps = 0;
+        for (uint256 i = 0; i < tokens.length; i++) {
+            if (!approvedTokens[tokens[i]]) revert TokenNotApproved();
+            totalBps += weights[i];
+        }
+        if (totalBps != 10000) revert InvalidWeights();
+
+        // Validate curator fee
+        require(
+            curatorFeeBps <= 10000 - feeManager.MIN_PROTOCOL_SHARE_BPS(),
+            "VaultFactory: curator fee too high"
+        );
+
+        // Create vault
+        UserVault uVault = new UserVault(
+            name,
+            symbol,
+            baseAsset,
+            address(feeManager),
+            rebalanceEngine,
+            msg.sender, // curator
+            approvedTokenList,
+            defaultTimeLock,
+            defaultMinRebalanceInterval
+        );
+
+        vault = address(uVault);
+        _registerVault(vault);
+
+        // Configure fees with curator split
+        feeManager.configureVaultFees(vault, curatorFeeBps, msg.sender);
+
+        // Register in registry
+        registry.registerVault(vault, VaultRegistry.VaultType.USER, msg.sender, metadataURI);
+
+        // Set initial target weights
+        IBaseVault.TokenWeight[] memory initialWeights = new IBaseVault.TokenWeight[](tokens.length);
+        for (uint256 i = 0; i < tokens.length; i++) {
+            initialWeights[i] = IBaseVault.TokenWeight({token: tokens[i], weightBps: weights[i]});
+        }
+
+        // Curator seeds the vault
+        IERC20(baseAsset).safeTransferFrom(msg.sender, vault, seedDeposit);
+
+        // Forward creation fee to protocol treasury
+        if (msg.value > 0) {
+            (bool success,) = feeManager.protocolTreasury().call{value: msg.value}("");
+            require(success, "VaultFactory: fee transfer failed");
+        }
+
+        emit UserVaultCreated(vault, msg.sender, name, symbol);
+    }
+
+    // ===================== Internal =====================
+
+    function _registerVault(address vault) internal {
+        allVaults.push(vault);
+        isVault[vault] = true;
+    }
+
+    // ===================== Views =====================
+
+    function getAllVaults() external view returns (address[] memory) {
+        return allVaults;
+    }
+
+    function getApprovedTokens() external view returns (address[] memory) {
+        return approvedTokenList;
+    }
+
+    function totalVaults() external view returns (uint256) {
+        return allVaults.length;
+    }
+
+    receive() external payable {}
+}

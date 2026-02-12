@@ -1,0 +1,21 @@
+# Build
+out/
+cache/
+broadcast/
+
+# Environment
+.env
+
+# Dependencies
+lib/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Coverage
+lcov.info
+coverage/
