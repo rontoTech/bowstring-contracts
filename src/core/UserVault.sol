@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {BaseVault} from "./BaseVault.sol";
 import {IBaseVault} from "../interfaces/IBaseVault.sol";
 import {IRebalanceEngine} from "../interfaces/IRebalanceEngine.sol";
+import {ITokenRouter} from "../interfaces/ITokenRouter.sol";
 
 /// @title UserVault
 /// @notice Permissionless vault where a curator sets target portfolio weights.
@@ -52,12 +53,13 @@ contract UserVault is BaseVault {
         address _baseAsset,
         address _feeManager,
         address _rebalanceEngine,
+        address _tokenRouter,
         address _curator,
         address[] memory _approvedTokens,
         uint256 _timeLock,
         uint256 _minRebalanceInterval
     )
-        BaseVault(_name, _symbol, _baseAsset, _feeManager, _rebalanceEngine)
+        BaseVault(_name, _symbol, _baseAsset, _feeManager, _rebalanceEngine, _tokenRouter)
     {
         require(_curator != address(0), "UserVault: zero curator");
         curator = _curator;
@@ -135,6 +137,11 @@ contract UserVault is BaseVault {
     function setRebalanceEngine(address _engine) external override onlyCurator {
         require(_engine != address(0), "UserVault: zero engine");
         rebalanceEngine = IRebalanceEngine(_engine);
+    }
+
+    function setTokenRouter(address _router) external override onlyCurator {
+        require(_router != address(0), "UserVault: zero router");
+        tokenRouter = ITokenRouter(_router);
     }
 
     // ===================== Internal =====================

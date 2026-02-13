@@ -17,10 +17,11 @@ contract VaultFactory is Ownable {
     using SafeERC20 for IERC20;
 
     // --- Immutables / Config ---
-    address public baseAsset; // USDC or main deposit token
+    address public baseAsset; // bowUSDC or main deposit token
     FeeManager public feeManager;
     VaultRegistry public registry;
     address public rebalanceEngine;
+    address public tokenRouter; // price oracle + swap router
     address public defaultOracle; // for politician vaults
 
     // --- Permissionless config ---
@@ -62,6 +63,7 @@ contract VaultFactory is Ownable {
         address _feeManager,
         address _registry,
         address _rebalanceEngine,
+        address _tokenRouter,
         address _defaultOracle
     ) Ownable(msg.sender) {
         require(_baseAsset != address(0), "VaultFactory: zero base asset");
@@ -69,10 +71,11 @@ contract VaultFactory is Ownable {
         feeManager = FeeManager(payable(_feeManager));
         registry = VaultRegistry(_registry);
         rebalanceEngine = _rebalanceEngine;
+        tokenRouter = _tokenRouter;
         defaultOracle = _defaultOracle;
 
         vaultCreationFee = 0.01 ether;
-        minSeedDeposit = 100e6; // 100 USDC (6 decimals)
+        minSeedDeposit = 100e18; // 100 bowUSDC (18 decimals)
         defaultTimeLock = 24 hours;
         defaultMinRebalanceInterval = 4 hours;
     }
@@ -146,6 +149,7 @@ contract VaultFactory is Ownable {
             oracleAddr,
             address(feeManager),
             rebalanceEngine,
+            tokenRouter,
             msg.sender
         );
 
@@ -210,6 +214,7 @@ contract VaultFactory is Ownable {
             baseAsset,
             address(feeManager),
             rebalanceEngine,
+            tokenRouter,
             msg.sender, // curator
             approvedTokenList,
             defaultTimeLock,

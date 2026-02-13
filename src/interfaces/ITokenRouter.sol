@@ -42,4 +42,9 @@ interface ITokenRouter {
     /// @param tokenOut The token to buy
     /// @return supported Whether the pair is supported
     function isPairSupported(address tokenIn, address tokenOut) external view returns (bool supported);
+
+    /// @notice Get the stored USD price for a token (18 decimals)
+    /// @param token The token address
+    /// @return price The price in USD with 18 decimals
+    function getTokenPrice(address token) external view returns (uint256 price);
 }

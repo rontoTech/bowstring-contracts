@@ -6,6 +6,7 @@ import {BaseVault} from "./BaseVault.sol";
 import {IBaseVault} from "../interfaces/IBaseVault.sol";
 import {IPortfolioOracle} from "../interfaces/IPortfolioOracle.sol";
 import {IRebalanceEngine} from "../interfaces/IRebalanceEngine.sol";
+import {ITokenRouter} from "../interfaces/ITokenRouter.sol";
 
 /// @title PoliticianVault
 /// @notice ERC-4626 vault that mirrors a politician's portfolio.
@@ -34,9 +35,10 @@ contract PoliticianVault is BaseVault, Ownable {
         address _oracle,
         address _feeManager,
         address _rebalanceEngine,
+        address _tokenRouter,
         address _owner
     )
-        BaseVault(_name, _symbol, _baseAsset, _feeManager, _rebalanceEngine)
+        BaseVault(_name, _symbol, _baseAsset, _feeManager, _rebalanceEngine, _tokenRouter)
         Ownable(_owner)
     {
         require(_oracle != address(0), "PoliticianVault: zero oracle");
@@ -61,6 +63,11 @@ contract PoliticianVault is BaseVault, Ownable {
     function setRebalanceEngine(address _engine) external override onlyOwner {
         require(_engine != address(0), "PoliticianVault: zero engine");
         rebalanceEngine = IRebalanceEngine(_engine);
+    }
+
+    function setTokenRouter(address _router) external override onlyOwner {
+        require(_router != address(0), "PoliticianVault: zero router");
+        tokenRouter = ITokenRouter(_router);
     }
 
     // ===================== Rebalance =====================

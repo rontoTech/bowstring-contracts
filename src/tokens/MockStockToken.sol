@@ -30,15 +30,35 @@ contract MockStockToken is ERC20, Ownable {
     }
 }
 
-/// @title MockUSDC
-/// @notice Mock USDC for testnet (6 decimals)
-contract MockUSDC is ERC20, Ownable {
-    constructor() ERC20("USD Coin", "USDC") Ownable(msg.sender) {}
+/// @title BowUSDC
+/// @notice Bowstring testnet USDC (18 decimals). Includes a public faucet for testers.
+contract BowUSDC is ERC20, Ownable {
+    uint256 public constant FAUCET_AMOUNT = 10_000e18; // 10,000 bowUSDC per claim
+    uint256 public constant FAUCET_COOLDOWN = 24 hours;
+
+    mapping(address => uint256) public lastFaucetClaim;
+
+    event FaucetClaimed(address indexed user, uint256 amount);
+
+    constructor() ERC20("Bowstring USDC", "bowUSDC") Ownable(msg.sender) {}
 
     function decimals() public pure override returns (uint8) {
-        return 6;
+        return 18;
     }
 
+    /// @notice Public faucet - anyone can claim 10,000 bowUSDC every 24 hours
+    function faucet() external {
+        require(
+            lastFaucetClaim[msg.sender] == 0 ||
+            block.timestamp >= lastFaucetClaim[msg.sender] + FAUCET_COOLDOWN,
+            "BowUSDC: faucet cooldown active"
+        );
+        lastFaucetClaim[msg.sender] = block.timestamp;
+        _mint(msg.sender, FAUCET_AMOUNT);
+        emit FaucetClaimed(msg.sender, FAUCET_AMOUNT);
+    }
+
+    /// @notice Owner mint for seeding liquidity
     function mint(address to, uint256 amount) external onlyOwner {
         _mint(to, amount);
     }
@@ -49,7 +69,7 @@ contract MockUSDC is ERC20, Ownable {
 }
 
 /// @title MockStockTokenFactory
-/// @notice Factory for creating mock stock tokens on testnet
+/// @notice Factory for creating bow-branded stock tokens on testnet
 contract MockStockTokenFactory is Ownable {
     struct StockTokenInfo {
         address token;
@@ -85,18 +105,18 @@ contract MockStockTokenFactory is Ownable {
         emit StockTokenCreated(token, name_, symbol_);
     }
 
-    /// @notice Deploy the standard set of stock tokens for testing
+    /// @notice Deploy the standard set of Bowstring stock tokens for testing
     function deployStandardTokens() external onlyOwner {
-        _createToken("Apple Inc.", "AAPL", 195e18);
-        _createToken("Microsoft Corp.", "MSFT", 420e18);
-        _createToken("NVIDIA Corp.", "NVDA", 875e18);
-        _createToken("Tesla Inc.", "TSLA", 250e18);
-        _createToken("Amazon.com Inc.", "AMZN", 185e18);
-        _createToken("Alphabet Inc.", "GOOGL", 165e18);
-        _createToken("Meta Platforms Inc.", "META", 500e18);
-        _createToken("JPMorgan Chase", "JPM", 205e18);
-        _createToken("Visa Inc.", "V", 290e18);
-        _createToken("Johnson & Johnson", "JNJ", 160e18);
+        _createToken("Bowstring Apple", "bowAAPL", 195e18);
+        _createToken("Bowstring Microsoft", "bowMSFT", 420e18);
+        _createToken("Bowstring NVIDIA", "bowNVDA", 875e18);
+        _createToken("Bowstring Tesla", "bowTSLA", 250e18);
+        _createToken("Bowstring Amazon", "bowAMZN", 185e18);
+        _createToken("Bowstring Alphabet", "bowGOOGL", 165e18);
+        _createToken("Bowstring Meta", "bowMETA", 500e18);
+        _createToken("Bowstring JPMorgan", "bowJPM", 205e18);
+        _createToken("Bowstring Visa", "bowV", 290e18);
+        _createToken("Bowstring J&J", "bowJNJ", 160e18);
     }
 
     /// @notice Mint tokens to an address (for seeding liquidity)

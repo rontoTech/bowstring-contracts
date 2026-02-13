@@ -80,13 +80,19 @@ contract RebalanceEngine is IRebalanceEngine, Ownable {
             uint16 targetBps = _findWeight(currentWeights[i].token, targetWeights);
             if (currentWeights[i].weightBps > targetBps) {
                 uint256 excessBps = currentWeights[i].weightBps - targetBps;
-                uint256 sellValue = (totalValue * excessBps) / 10000;
-                if (sellValue > 0) {
-                    uint256 minOut = (sellValue * (10000 - maxSlippageBps)) / 10000;
+                uint256 sellValueBase = (totalValue * excessBps) / 10000; // value in base asset terms
+
+                if (sellValueBase > 0) {
+                    // Convert base-asset value to token units using router quote
+                    // getQuote(baseAsset, token, amount) = how many tokens is this base amount worth
+                    uint256 sellAmountTokens = tokenRouter.getQuote(
+                        baseAsset, currentWeights[i].token, sellValueBase
+                    );
+                    uint256 minOut = (sellValueBase * (10000 - maxSlippageBps)) / 10000;
                     tempTrades[tradeCount] = TradeOrder({
                         tokenIn: currentWeights[i].token,
                         tokenOut: baseAsset,
-                        amountIn: sellValue,
+                        amountIn: sellAmountTokens,
                         minAmountOut: minOut
                     });
                     tradeCount++;

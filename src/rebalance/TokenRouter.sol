@@ -109,6 +109,11 @@ contract MockTokenRouter is ITokenRouter, Ownable {
         return pairSupported[tokenIn][tokenOut];
     }
 
+    /// @notice Get the stored USD price for a token
+    function getTokenPrice(address token) external view override returns (uint256) {
+        return tokenPrices[token];
+    }
+
     // ===================== Liquidity Management (Mock) =====================
 
     /// @notice Fund the router with tokens for swaps (testnet only)

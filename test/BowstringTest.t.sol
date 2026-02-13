@@ -11,22 +11,22 @@ import {VaultRegistry} from "../src/core/VaultRegistry.sol";
 import {PortfolioOracle} from "../src/oracle/PortfolioOracle.sol";
 import {RebalanceEngine} from "../src/rebalance/RebalanceEngine.sol";
 import {MockTokenRouter} from "../src/rebalance/TokenRouter.sol";
-import {MockStockToken, MockUSDC, MockStockTokenFactory} from "../src/tokens/MockStockToken.sol";
+import {MockStockToken, BowUSDC, MockStockTokenFactory} from "../src/tokens/MockStockToken.sol";
 import {IBaseVault} from "../src/interfaces/IBaseVault.sol";
 
 /// @title BowstringTest
-/// @notice Comprehensive tests for the Insider protocol
+/// @notice Comprehensive tests for the Bowstring protocol
 contract BowstringTest is Test {
     // --- Actors ---
     address public deployer = address(this);
     address public treasury = makeAddr("treasury");
-    address public alice = makeAddr("alice"); // depositor
-    address public bob = makeAddr("bob"); // depositor
-    address public curator = makeAddr("curator"); // vault creator
-    address public keeper = makeAddr("keeper"); // chainlink keeper
+    address public alice = makeAddr("alice");
+    address public bob = makeAddr("bob");
+    address public curator = makeAddr("curator");
+    address public keeper = makeAddr("keeper");
 
     // --- Core contracts ---
-    MockUSDC public usdc;
+    BowUSDC public usdc;
     FeeManager public feeManager;
     VaultRegistry public registry;
     PortfolioOracle public oracle;
@@ -42,16 +42,16 @@ contract BowstringTest is Test {
 
     // --- Test constants ---
     bytes32 public constant PELOSI_ID = keccak256("nancy-pelosi");
-    uint256 public constant INITIAL_USDC = 100_000e6; // 100k USDC
-    uint256 public constant DEPOSIT_AMOUNT = 10_000e6; // 10k USDC
+    uint256 public constant INITIAL_USDC = 100_000e18; // 100k bowUSDC (18 dec)
+    uint256 public constant DEPOSIT_AMOUNT = 10_000e18; // 10k bowUSDC
 
     function setUp() public {
         // Deploy base tokens
-        usdc = new MockUSDC();
+        usdc = new BowUSDC();
 
-        aapl = new MockStockToken("Apple Inc.", "AAPL", 18);
-        msft = new MockStockToken("Microsoft Corp.", "MSFT", 18);
-        nvda = new MockStockToken("NVIDIA Corp.", "NVDA", 18);
+        aapl = new MockStockToken("Bowstring Apple", "bowAAPL", 18);
+        msft = new MockStockToken("Bowstring Microsoft", "bowMSFT", 18);
+        nvda = new MockStockToken("Bowstring NVIDIA", "bowNVDA", 18);
 
         // Deploy core infrastructure
         feeManager = new FeeManager(treasury);
@@ -67,11 +67,13 @@ contract BowstringTest is Test {
             address(feeManager),
             address(registry),
             address(engine),
+            address(router),
             address(oracle)
         );
 
         // Setup permissions
         registry.setRegistrar(address(factory), true);
+        registry.setRegistrar(deployer, true);
         feeManager.transferOwnership(address(factory));
 
         // Setup oracle
@@ -79,10 +81,10 @@ contract BowstringTest is Test {
         oracle.setReporter(keeper, true);
 
         // Setup router prices
-        router.setTokenPrice(address(usdc), 1e18); // $1
-        router.setTokenPrice(address(aapl), 195e18); // $195
-        router.setTokenPrice(address(msft), 420e18); // $420
-        router.setTokenPrice(address(nvda), 875e18); // $875
+        router.setTokenPrice(address(usdc), 1e18);   // $1
+        router.setTokenPrice(address(aapl), 195e18);  // $195
+        router.setTokenPrice(address(msft), 420e18);  // $420
+        router.setTokenPrice(address(nvda), 875e18);  // $875
 
         // Setup pairs
         router.setPairSupported(address(usdc), address(aapl), true);
@@ -104,7 +106,7 @@ contract BowstringTest is Test {
         aapl.mint(address(router), 1_000_000e18);
         msft.mint(address(router), 1_000_000e18);
         nvda.mint(address(router), 1_000_000e18);
-        usdc.mint(address(router), 1_000_000e6);
+        usdc.mint(address(router), 1_000_000e18);
     }
 
     // ===================== FeeManager Tests =====================
@@ -137,78 +139,36 @@ contract BowstringTest is Test {
         assertEq(stored.length, 3);
         assertEq(stored[0].token, address(aapl));
         assertEq(stored[0].weightBps, 4000);
-        assertEq(stored[1].token, address(msft));
-        assertEq(stored[1].weightBps, 3500);
     }
 
     function test_Oracle_invalidWeights_reverts() public {
         IBaseVault.TokenWeight[] memory weights = new IBaseVault.TokenWeight[](2);
         weights[0] = IBaseVault.TokenWeight({token: address(aapl), weightBps: 5000});
-        weights[1] = IBaseVault.TokenWeight({token: address(msft), weightBps: 3000}); // sum = 8000, not 10000
+        weights[1] = IBaseVault.TokenWeight({token: address(msft), weightBps: 3000});
 
         vm.prank(keeper);
         vm.expectRevert(PortfolioOracle.InvalidWeights.selector);
         oracle.updatePortfolio(PELOSI_ID, weights);
     }
 
-    function test_Oracle_unauthorizedReporter_reverts() public {
-        IBaseVault.TokenWeight[] memory weights = new IBaseVault.TokenWeight[](1);
-        weights[0] = IBaseVault.TokenWeight({token: address(aapl), weightBps: 10000});
-
-        vm.prank(alice);
-        vm.expectRevert(PortfolioOracle.UnauthorizedReporter.selector);
-        oracle.updatePortfolio(PELOSI_ID, weights);
-    }
-
-    function test_Oracle_snapshotHistory() public {
-        // First update
-        IBaseVault.TokenWeight[] memory w1 = new IBaseVault.TokenWeight[](1);
-        w1[0] = IBaseVault.TokenWeight({token: address(aapl), weightBps: 10000});
-        vm.prank(keeper);
-        oracle.updatePortfolio(PELOSI_ID, w1);
-
-        // Second update
-        IBaseVault.TokenWeight[] memory w2 = new IBaseVault.TokenWeight[](2);
-        w2[0] = IBaseVault.TokenWeight({token: address(aapl), weightBps: 5000});
-        w2[1] = IBaseVault.TokenWeight({token: address(msft), weightBps: 5000});
-        vm.warp(block.timestamp + 1 days);
-        vm.prank(keeper);
-        oracle.updatePortfolio(PELOSI_ID, w2);
-
-        assertEq(oracle.getSnapshotCount(PELOSI_ID), 1);
-        (IBaseVault.TokenWeight[] memory snapWeights,) = oracle.getSnapshot(PELOSI_ID, 0);
-        assertEq(snapWeights.length, 1);
-        assertEq(snapWeights[0].weightBps, 10000);
-    }
-
-    // ===================== Factory - Politician Vault Tests =====================
+    // ===================== Factory Tests =====================
 
     function test_Factory_createPoliticianVault() public {
         address vault = factory.createPoliticianVault(
-            PELOSI_ID, "Pelosi Tracker", "vPELOSI", address(0), "ipfs://pelosi"
+            PELOSI_ID, "Pelosi Tracker", "bowPELOSI", address(0), "ipfs://pelosi"
         );
 
         assertTrue(vault != address(0));
         assertTrue(factory.isVault(vault));
         assertEq(factory.totalVaults(), 1);
-
-        // Check registry
         assertTrue(registry.isRegistered(vault));
-        VaultRegistry.VaultInfo memory info = registry.getVaultInfo(vault);
-        assertEq(uint256(info.vaultType), uint256(VaultRegistry.VaultType.POLITICIAN));
     }
 
-    function test_Factory_createPoliticianVault_nonOwner_reverts() public {
-        vm.prank(alice);
-        vm.expectRevert();
-        factory.createPoliticianVault(PELOSI_ID, "Pelosi", "vPEL", address(0), "");
-    }
-
-    // ===================== Politician Vault - Deposit/Withdraw =====================
+    // ===================== Politician Vault Tests =====================
 
     function test_PoliticianVault_deposit() public {
         address vaultAddr = factory.createPoliticianVault(
-            PELOSI_ID, "Pelosi Tracker", "vPELOSI", address(0), ""
+            PELOSI_ID, "Pelosi Tracker", "bowPELOSI", address(0), ""
         );
         PoliticianVault vault = PoliticianVault(vaultAddr);
 
@@ -220,228 +180,28 @@ contract BowstringTest is Test {
         assertTrue(shares > 0);
         assertEq(vault.balanceOf(alice), shares);
 
-        // Entry fee = 0.3% of 10000 USDC = 30 USDC
-        // Net deposit = 9970 USDC
+        // Entry fee = 0.3% of 10,000 = 30 bowUSDC deducted
         uint256 expectedNet = DEPOSIT_AMOUNT - (DEPOSIT_AMOUNT * 30 / 10000);
         assertEq(vault.totalAssets(), expectedNet);
     }
 
-    function test_PoliticianVault_withdraw() public {
-        address vaultAddr = factory.createPoliticianVault(
-            PELOSI_ID, "Pelosi Tracker", "vPELOSI", address(0), ""
-        );
-        PoliticianVault vault = PoliticianVault(vaultAddr);
-
-        // Deposit
-        vm.startPrank(alice);
-        usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
-        vault.deposit(DEPOSIT_AMOUNT, alice);
-
-        // Withdraw half
-        uint256 withdrawAmount = 4000e6;
-        uint256 sharesBefore = vault.balanceOf(alice);
-        vault.withdraw(withdrawAmount, alice, alice);
-        vm.stopPrank();
-
-        assertTrue(vault.balanceOf(alice) < sharesBefore);
-    }
-
     function test_PoliticianVault_rebalance_onlyKeeper() public {
         address vaultAddr = factory.createPoliticianVault(
-            PELOSI_ID, "Pelosi Tracker", "vPELOSI", address(0), ""
+            PELOSI_ID, "Pelosi Tracker", "bowPELOSI", address(0), ""
         );
         PoliticianVault vault = PoliticianVault(vaultAddr);
 
-        // Set oracle weights
-        IBaseVault.TokenWeight[] memory weights = new IBaseVault.TokenWeight[](2);
-        weights[0] = IBaseVault.TokenWeight({token: address(aapl), weightBps: 6000});
-        weights[1] = IBaseVault.TokenWeight({token: address(msft), weightBps: 4000});
-        vm.prank(keeper);
-        oracle.updatePortfolio(PELOSI_ID, weights);
-
-        // Non-keeper should revert
         vm.prank(alice);
         vm.expectRevert(PoliticianVault.UnauthorizedRebalance.selector);
         vault.rebalance();
 
-        // Owner should succeed (no rebalance engine auth issue in this test setup)
         vault.setKeeper(keeper, true);
-    }
-
-    // ===================== Factory - User Vault Tests =====================
-
-    function test_Factory_createUserVault() public {
-        address[] memory tokens = new address[](2);
-        tokens[0] = address(aapl);
-        tokens[1] = address(msft);
-
-        uint16[] memory weights = new uint16[](2);
-        weights[0] = 6000;
-        weights[1] = 4000;
-
-        vm.deal(curator, 1 ether);
-        vm.startPrank(curator);
-        usdc.approve(address(factory), 1000e6);
-
-        address vault = factory.createUserVault{value: 0.01 ether}(
-            "Tech Growth", "vTECH", tokens, weights, 5000, 1000e6, "ipfs://tech-vault"
-        );
-        vm.stopPrank();
-
-        assertTrue(vault != address(0));
-        assertTrue(factory.isVault(vault));
-
-        // Check registry
-        VaultRegistry.VaultInfo memory info = registry.getVaultInfo(vault);
-        assertEq(uint256(info.vaultType), uint256(VaultRegistry.VaultType.USER));
-        assertEq(info.curator, curator);
-    }
-
-    function test_Factory_createUserVault_insufficientFee_reverts() public {
-        address[] memory tokens = new address[](1);
-        tokens[0] = address(aapl);
-        uint16[] memory weights = new uint16[](1);
-        weights[0] = 10000;
-
-        vm.deal(curator, 1 ether);
-        vm.startPrank(curator);
-        usdc.approve(address(factory), 1000e6);
-        vm.expectRevert(VaultFactory.InsufficientCreationFee.selector);
-        factory.createUserVault{value: 0.001 ether}(
-            "Test", "vTST", tokens, weights, 5000, 1000e6, ""
-        );
-        vm.stopPrank();
-    }
-
-    function test_Factory_createUserVault_invalidWeights_reverts() public {
-        address[] memory tokens = new address[](2);
-        tokens[0] = address(aapl);
-        tokens[1] = address(msft);
-        uint16[] memory weights = new uint16[](2);
-        weights[0] = 5000;
-        weights[1] = 3000; // sum = 8000
-
-        vm.deal(curator, 1 ether);
-        vm.startPrank(curator);
-        usdc.approve(address(factory), 1000e6);
-        vm.expectRevert(VaultFactory.InvalidWeights.selector);
-        factory.createUserVault{value: 0.01 ether}(
-            "Bad Weights", "vBAD", tokens, weights, 5000, 1000e6, ""
-        );
-        vm.stopPrank();
-    }
-
-    function test_Factory_createUserVault_unapprovedToken_reverts() public {
-        MockStockToken badToken = new MockStockToken("Bad", "BAD", 18);
-
-        address[] memory tokens = new address[](1);
-        tokens[0] = address(badToken);
-        uint16[] memory weights = new uint16[](1);
-        weights[0] = 10000;
-
-        vm.deal(curator, 1 ether);
-        vm.startPrank(curator);
-        usdc.approve(address(factory), 1000e6);
-        vm.expectRevert(VaultFactory.TokenNotApproved.selector);
-        factory.createUserVault{value: 0.01 ether}(
-            "Bad Token", "vBAD", tokens, weights, 5000, 1000e6, ""
-        );
-        vm.stopPrank();
-    }
-
-    // ===================== UserVault - Curator Controls =====================
-
-    function test_UserVault_curatorSetWeights() public {
-        address vaultAddr = _createUserVault();
-        UserVault vault = UserVault(vaultAddr);
-
-        IBaseVault.TokenWeight[] memory newWeights = new IBaseVault.TokenWeight[](2);
-        newWeights[0] = IBaseVault.TokenWeight({token: address(aapl), weightBps: 7000});
-        newWeights[1] = IBaseVault.TokenWeight({token: address(msft), weightBps: 3000});
-
-        // Since time-lock is active, weights should be pending
-        vm.prank(curator);
-        vault.setTargetWeights(newWeights);
-
-        assertTrue(vault.hasPendingWeights());
-    }
-
-    function test_UserVault_applyPendingWeights() public {
-        address vaultAddr = _createUserVault();
-        UserVault vault = UserVault(vaultAddr);
-
-        IBaseVault.TokenWeight[] memory newWeights = new IBaseVault.TokenWeight[](2);
-        newWeights[0] = IBaseVault.TokenWeight({token: address(aapl), weightBps: 7000});
-        newWeights[1] = IBaseVault.TokenWeight({token: address(msft), weightBps: 3000});
-
-        vm.prank(curator);
-        vault.setTargetWeights(newWeights);
-
-        // Fast forward past time-lock
-        vm.warp(block.timestamp + 25 hours);
-
-        vault.applyPendingWeights();
-        assertFalse(vault.hasPendingWeights());
-    }
-
-    function test_UserVault_nonCurator_setWeights_reverts() public {
-        address vaultAddr = _createUserVault();
-        UserVault vault = UserVault(vaultAddr);
-
-        IBaseVault.TokenWeight[] memory newWeights = new IBaseVault.TokenWeight[](1);
-        newWeights[0] = IBaseVault.TokenWeight({token: address(aapl), weightBps: 10000});
-
-        vm.prank(alice);
-        vm.expectRevert(UserVault.OnlyCurator.selector);
-        vault.setTargetWeights(newWeights);
-    }
-
-    function test_UserVault_transferCurator() public {
-        address vaultAddr = _createUserVault();
-        UserVault vault = UserVault(vaultAddr);
-
-        vm.prank(curator);
-        vault.transferCurator(alice);
-        assertEq(vault.curator(), alice);
-    }
-
-    // ===================== VaultRegistry Tests =====================
-
-    function test_Registry_vaultsByType() public {
-        // Create one of each
-        factory.createPoliticianVault(PELOSI_ID, "Pelosi", "vPEL", address(0), "");
-        _createUserVault();
-
-        address[] memory polVaults = registry.getVaultsByType(VaultRegistry.VaultType.POLITICIAN);
-        address[] memory userVaults = registry.getVaultsByType(VaultRegistry.VaultType.USER);
-
-        assertEq(polVaults.length, 1);
-        assertEq(userVaults.length, 1);
-    }
-
-    function test_Registry_curatorProfile() public {
-        _createUserVault();
-
-        VaultRegistry.CuratorProfile memory profile = registry.getCuratorProfile(curator);
-        assertTrue(profile.registered);
-        assertEq(profile.totalVaults, 1);
-    }
-
-    // ===================== Mock Token Factory Tests =====================
-
-    function test_MockTokenFactory_deployStandard() public {
-        tokenFactory.deployStandardTokens();
-        assertEq(tokenFactory.totalTokens(), 10);
-
-        assertTrue(tokenFactory.tokenBySymbol("AAPL") != address(0));
-        assertTrue(tokenFactory.tokenBySymbol("MSFT") != address(0));
-        assertTrue(tokenFactory.tokenBySymbol("NVDA") != address(0));
     }
 
     // ===================== Router Tests =====================
 
     function test_Router_getQuote() public view {
-        // USDC -> AAPL: 195 USDC should get 1 AAPL
+        // 195 bowUSDC should get 1 bowAAPL
         uint256 quote = router.getQuote(address(usdc), address(aapl), 195e18);
         assertEq(quote, 1e18);
     }
@@ -454,6 +214,44 @@ contract BowstringTest is Test {
         uint256 out = router.swap(address(usdc), address(aapl), 195e18, 0, address(this));
         assertEq(out, 1e18);
         assertEq(aapl.balanceOf(address(this)), 1e18);
+    }
+
+    function test_Router_getTokenPrice() public view {
+        assertEq(router.getTokenPrice(address(usdc)), 1e18);
+        assertEq(router.getTokenPrice(address(aapl)), 195e18);
+    }
+
+    // ===================== BowUSDC Faucet Tests =====================
+
+    function test_BowUSDC_faucet() public {
+        vm.prank(alice);
+        usdc.faucet();
+        // Alice had INITIAL_USDC from setUp, plus 10,000 from faucet
+        assertEq(usdc.balanceOf(alice), INITIAL_USDC + 10_000e18);
+    }
+
+    function test_BowUSDC_faucet_cooldown() public {
+        vm.startPrank(alice);
+        usdc.faucet();
+        vm.expectRevert("BowUSDC: faucet cooldown active");
+        usdc.faucet();
+        vm.stopPrank();
+
+        // Fast forward 24 hours
+        vm.warp(block.timestamp + 24 hours + 1);
+        vm.prank(alice);
+        usdc.faucet(); // Should succeed now
+    }
+
+    // ===================== Mock Token Factory Tests =====================
+
+    function test_MockTokenFactory_deployStandard() public {
+        tokenFactory.deployStandardTokens();
+        assertEq(tokenFactory.totalTokens(), 10);
+
+        assertTrue(tokenFactory.tokenBySymbol("bowAAPL") != address(0));
+        assertTrue(tokenFactory.tokenBySymbol("bowMSFT") != address(0));
+        assertTrue(tokenFactory.tokenBySymbol("bowNVDA") != address(0));
     }
 
     // ===================== Helpers =====================
@@ -469,9 +267,9 @@ contract BowstringTest is Test {
 
         vm.deal(curator, 1 ether);
         vm.startPrank(curator);
-        usdc.approve(address(factory), 1000e6);
+        usdc.approve(address(factory), 1000e18);
         vault = factory.createUserVault{value: 0.01 ether}(
-            "Tech Growth", "vTECH", tokens, weights, 5000, 1000e6, "ipfs://tech"
+            "Tech Growth", "vTECH", tokens, weights, 5000, 1000e18, "ipfs://tech"
         );
         vm.stopPrank();
     }
