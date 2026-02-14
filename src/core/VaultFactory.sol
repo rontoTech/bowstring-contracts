@@ -207,7 +207,13 @@ contract VaultFactory is Ownable {
             "VaultFactory: curator fee too high"
         );
 
-        // Create vault
+        // Build initial weights array
+        IBaseVault.TokenWeight[] memory initialWeights = new IBaseVault.TokenWeight[](tokens.length);
+        for (uint256 i = 0; i < tokens.length; i++) {
+            initialWeights[i] = IBaseVault.TokenWeight({token: tokens[i], weightBps: weights[i]});
+        }
+
+        // Create vault with initial weights set in constructor
         UserVault uVault = new UserVault(
             name,
             symbol,
@@ -218,7 +224,8 @@ contract VaultFactory is Ownable {
             msg.sender, // curator
             approvedTokenList,
             defaultTimeLock,
-            defaultMinRebalanceInterval
+            defaultMinRebalanceInterval,
+            initialWeights
         );
 
         vault = address(uVault);
@@ -230,14 +237,18 @@ contract VaultFactory is Ownable {
         // Register in registry
         registry.registerVault(vault, VaultRegistry.VaultType.USER, msg.sender, metadataURI);
 
-        // Set initial target weights
-        IBaseVault.TokenWeight[] memory initialWeights = new IBaseVault.TokenWeight[](tokens.length);
-        for (uint256 i = 0; i < tokens.length; i++) {
-            initialWeights[i] = IBaseVault.TokenWeight({token: tokens[i], weightBps: weights[i]});
-        }
+        // --- Seed deposit: pull bowUSDC to factory, then deposit through vault ---
+        // This properly mints shares to the creator instead of a bare transfer.
+        IERC20(baseAsset).safeTransferFrom(msg.sender, address(this), seedDeposit);
+        IERC20(baseAsset).approve(vault, seedDeposit);
 
-        // Curator seeds the vault
-        IERC20(baseAsset).safeTransferFrom(msg.sender, vault, seedDeposit);
+        // Dead shares: tiny first deposit to address(1) to prevent donation/inflation attack.
+        // With 1e3 dead shares, an attacker must donate >1000x the victim's deposit to steal value.
+        uint256 DEAD_SHARE_AMOUNT = 1e3; // negligible: 0.000000000000001 bowUSDC
+        uVault.deposit(DEAD_SHARE_AMOUNT, address(1));
+
+        // Real seed deposit — mints shares to the vault creator
+        uVault.deposit(seedDeposit - DEAD_SHARE_AMOUNT, msg.sender);
 
         // Forward creation fee to protocol treasury
         if (msg.value > 0) {

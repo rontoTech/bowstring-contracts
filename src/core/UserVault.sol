@@ -58,7 +58,8 @@ contract UserVault is BaseVault {
         address _curator,
         address[] memory _approvedTokens,
         uint256 _timeLock,
-        uint256 _minRebalanceInterval
+        uint256 _minRebalanceInterval,
+        IBaseVault.TokenWeight[] memory _initialWeights
     )
         BaseVault(_name, _symbol, _baseAsset, _feeManager, _rebalanceEngine, _tokenRouter)
     {
@@ -72,6 +73,17 @@ contract UserVault is BaseVault {
         for (uint256 i = 0; i < _approvedTokens.length; i++) {
             approvedTokens[_approvedTokens[i]] = true;
             approvedTokenList.push(_approvedTokens[i]);
+        }
+
+        // Set initial target weights (validated by factory before passing)
+        if (_initialWeights.length > 0) {
+            uint256 totalBps = 0;
+            for (uint256 i = 0; i < _initialWeights.length; i++) {
+                require(approvedTokens[_initialWeights[i].token], "UserVault: token not approved");
+                totalBps += _initialWeights[i].weightBps;
+                _targetWeights.push(_initialWeights[i]);
+            }
+            require(totalBps == 10000, "UserVault: weights must sum to 10000");
         }
     }
 

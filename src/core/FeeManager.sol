@@ -40,6 +40,9 @@ contract FeeManager is Ownable {
     mapping(address => uint256) public accumulatedProtocolFees;
     mapping(address => uint256) public accumulatedCuratorFees; // curator address => fees
 
+    // --- Authorized callers (factories, admin scripts) ---
+    mapping(address => bool) public authorizedCallers;
+
     // --- Events ---
     event DefaultFeesUpdated(uint16 entryBps, uint16 exitBps, uint16 mgmtBps, uint16 perfBps);
     event VaultFeeConfigured(address indexed vault, VaultFeeConfig config);
@@ -47,6 +50,7 @@ contract FeeManager is Ownable {
     event ProtocolFeesCollected(address indexed recipient, uint256 amount);
     event CuratorFeesCollected(address indexed curator, uint256 amount);
     event TreasuryUpdated(address indexed newTreasury);
+    event CallerAuthorized(address indexed caller, bool authorized);
 
     constructor(address _treasury) Ownable(msg.sender) {
         require(_treasury != address(0), "FeeManager: zero treasury");
@@ -54,6 +58,16 @@ contract FeeManager is Ownable {
     }
 
     // --- Admin functions ---
+
+    modifier onlyAuthorized() {
+        require(msg.sender == owner() || authorizedCallers[msg.sender], "FeeManager: not authorized");
+        _;
+    }
+
+    function setAuthorizedCaller(address caller, bool authorized) external onlyOwner {
+        authorizedCallers[caller] = authorized;
+        emit CallerAuthorized(caller, authorized);
+    }
 
     function setDefaultFees(
         uint16 _entryBps,
@@ -85,7 +99,7 @@ contract FeeManager is Ownable {
         address vault,
         uint16 curatorShareBps,
         address curator
-    ) external onlyOwner {
+    ) external onlyAuthorized {
         require(curatorShareBps <= BPS_DENOMINATOR - MIN_PROTOCOL_SHARE_BPS, "FeeManager: curator share too high");
 
         vaultFees[vault] = VaultFeeConfig({
