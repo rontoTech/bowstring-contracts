@@ -107,7 +107,9 @@ contract RebalanceEngine is IRebalanceEngine, Ownable {
                 uint256 deficitBps = targetWeights[i].weightBps - currentBps;
                 uint256 buyValue = (totalValue * deficitBps) / 10000;
                 if (buyValue > 0) {
-                    uint256 minOut = (buyValue * (10000 - maxSlippageBps)) / 10000;
+                    // Get expected output in target token units, then apply slippage
+                    uint256 expectedOut = tokenRouter.getQuote(baseAsset, targetWeights[i].token, buyValue);
+                    uint256 minOut = (expectedOut * (10000 - maxSlippageBps)) / 10000;
                     tempTrades[tradeCount] = TradeOrder({
                         tokenIn: baseAsset,
                         tokenOut: targetWeights[i].token,
