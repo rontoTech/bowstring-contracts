@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
@@ -20,8 +21,8 @@ abstract contract BaseVault is ERC20, ReentrancyGuard {
     using SafeERC20 for IERC20;
     using Math for uint256;
 
-    // --- Immutables ---
-    IERC20 public immutable baseAsset; // deposit/withdraw token (bowUSDC)
+    // --- Core ---
+    IERC20 public baseAsset; // deposit/withdraw token (bowUSDC) — mutable by owner
     FeeManager public immutable feeManager;
     IRebalanceEngine public rebalanceEngine;
     ITokenRouter public tokenRouter; // price oracle + swap router
@@ -39,6 +40,7 @@ abstract contract BaseVault is ERC20, ReentrancyGuard {
     event Deposited(address indexed depositor, uint256 assets, uint256 shares);
     event Withdrawn(address indexed withdrawer, uint256 assets, uint256 shares);
     event RebalanceTriggered(uint256 timestamp);
+    event BaseAssetUpdated(address indexed oldAsset, address indexed newAsset);
 
     // --- Errors ---
     error ZeroAmount();
@@ -74,6 +76,29 @@ abstract contract BaseVault is ERC20, ReentrancyGuard {
     function depositAndRebalance(uint256 assets, address receiver) external nonReentrant returns (uint256 shares) {
         shares = _deposit(assets, receiver);
         _executeRebalance();
+    }
+
+    /// @notice Deposit using EIP-2612 permit — approve + deposit in a single transaction.
+    ///         The user signs a permit off-chain (gasless), and the vault calls permit() then deposit().
+    function depositWithPermit(
+        uint256 assets,
+        address receiver,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external nonReentrant returns (uint256 shares) {
+        // Execute the permit to set allowance
+        IERC20Permit(address(baseAsset)).permit(
+            msg.sender,
+            address(this),
+            assets,
+            deadline,
+            v,
+            r,
+            s
+        );
+        shares = _deposit(assets, receiver);
     }
 
     /// @dev Internal deposit logic shared by deposit() and depositAndRebalance()
@@ -429,4 +454,6 @@ abstract contract BaseVault is ERC20, ReentrancyGuard {
     function setRebalanceEngine(address _engine) external virtual;
 
     function setTokenRouter(address _router) external virtual;
+
+    function setBaseAsset(address _baseAsset) external virtual;
 }

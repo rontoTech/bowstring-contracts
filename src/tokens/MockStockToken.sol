@@ -31,8 +31,12 @@ contract MockStockToken is ERC20, Ownable {
 }
 
 /// @title BowUSDC
-/// @notice Bowstring testnet USDC (18 decimals). Includes a public faucet for testers.
-contract BowUSDC is ERC20, Ownable {
+/// @notice Bowstring testnet USDC (18 decimals) with EIP-2612 permit support.
+///         Mimics real USDC functionality for gasless approvals.
+///         Includes a public faucet for testers.
+import {ERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
+
+contract BowUSDC is ERC20, ERC20Permit, Ownable {
     uint256 public constant FAUCET_AMOUNT = 10_000e18; // 10,000 bowUSDC per claim
     uint256 public constant FAUCET_COOLDOWN = 24 hours;
 
@@ -40,10 +44,15 @@ contract BowUSDC is ERC20, Ownable {
 
     event FaucetClaimed(address indexed user, uint256 amount);
 
-    constructor() ERC20("Bowstring USDC", "bowUSDC") Ownable(msg.sender) {}
+    constructor() ERC20("Bowstring USDC", "bowUSDC") ERC20Permit("Bowstring USDC") Ownable(msg.sender) {}
 
     function decimals() public pure override returns (uint8) {
         return 18;
+    }
+
+    /// @notice Override nonces for ERC20Permit (required by Solidity when inheriting both)
+    function nonces(address owner) public view override(ERC20Permit) returns (uint256) {
+        return super.nonces(owner);
     }
 
     /// @notice Public faucet - anyone can claim 10,000 bowUSDC every 24 hours

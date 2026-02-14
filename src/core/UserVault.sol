@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {BaseVault} from "./BaseVault.sol";
 import {IBaseVault} from "../interfaces/IBaseVault.sol";
 import {IRebalanceEngine} from "../interfaces/IRebalanceEngine.sol";
@@ -142,6 +143,13 @@ contract UserVault is BaseVault {
     function setTokenRouter(address _router) external override onlyCurator {
         require(_router != address(0), "UserVault: zero router");
         tokenRouter = ITokenRouter(_router);
+    }
+
+    function setBaseAsset(address _baseAsset) external override onlyCurator {
+        require(_baseAsset != address(0), "UserVault: zero base asset");
+        address old = address(baseAsset);
+        baseAsset = IERC20(_baseAsset);
+        emit BaseAssetUpdated(old, _baseAsset);
     }
 
     // ===================== Internal =====================
