@@ -50,12 +50,15 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
 
     // --- Constants ---
     uint256 public constant MIN_DEPOSIT = 1000; // minimum deposit to prevent dust attacks (below dead shares)
+    uint256 public constant MAX_HELD_TOKENS = 30; // cap held token array to prevent gas DoS
+    uint256 public constant DUST_THRESHOLD = 1; // min value (in base asset units) to keep a token tracked
 
     // --- Errors ---
     error ZeroAmount();
     error ZeroAddress();
     error SlippageExceeded();
     error DepositTooSmall();
+    error OracleDegraded(); // deposits blocked when a held token has zero oracle price
 
     constructor(
         string memory _name,
@@ -119,11 +122,14 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
         shares = _deposit(assets, receiver);
     }
 
-    /// @dev Internal deposit logic shared by all deposit variants
+    /// @dev Internal deposit logic shared by all deposit variants.
+    ///      Blocks deposits when any held token has a zero oracle price to prevent
+    ///      undervaluation arbitrage. Withdrawals remain open for user safety.
     function _deposit(uint256 assets, address receiver) internal returns (uint256 shares) {
         if (assets == 0) revert ZeroAmount();
         if (assets < MIN_DEPOSIT) revert DepositTooSmall();
         if (receiver == address(0)) revert ZeroAddress();
+        if (_hasZeroPriceToken()) revert OracleDegraded();
 
         _accrueManagementFee();
 
@@ -340,6 +346,9 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
 
     /// @notice Calculate total vault value from actual token balances and prices.
     ///         Normalizes all token values to base asset decimals for correct NAV.
+    ///         Tokens with a zero price are gracefully skipped to prevent oracle
+    ///         failures from blocking all deposits and withdrawals (DoS).
+    ///         The base asset price is still required (zero = critical failure).
     function _totalAssets() internal view returns (uint256 total) {
         total = baseAsset.balanceOf(address(this));
         uint256 baseDecimals = _tokenDecimals(address(baseAsset));
@@ -353,10 +362,9 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
                 uint256 bal = IERC20(token).balanceOf(address(this));
                 if (bal > 0) {
                     uint256 tokenPrice = tokenRouter.getTokenPrice(token);
-                    require(tokenPrice > 0, "BaseVault: held token price is zero");
+                    if (tokenPrice == 0) continue;
 
                     uint256 tokenDec = _tokenDecimals(token);
-                    // Normalize: (bal * tokenPrice / basePrice) adjusted from tokenDecimals to baseDecimals
                     if (tokenDec >= baseDecimals) {
                         total += (bal * tokenPrice) / basePrice / (10 ** (tokenDec - baseDecimals));
                     } else {
@@ -393,6 +401,19 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
         } else {
             return (bal * tokenPrice) * (10 ** (baseDec - tokenDec)) / basePrice;
         }
+    }
+
+    /// @notice Check if any held token with a non-zero balance has a zero oracle price.
+    ///         Used as a deposit-side circuit breaker to prevent undervaluation arbitrage.
+    function _hasZeroPriceToken() internal view returns (bool) {
+        if (address(tokenRouter) == address(0)) return false;
+        for (uint256 i = 0; i < heldTokens.length; i++) {
+            address token = heldTokens[i];
+            if (IERC20(token).balanceOf(address(this)) > 0) {
+                if (tokenRouter.getTokenPrice(token) == 0) return true;
+            }
+        }
+        return false;
     }
 
     // ===================== Liquidity Management =====================
@@ -580,20 +601,26 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
         }
         delete heldTokens;
 
-        // Add tokens from new target weights
+        // Add tokens from new target weights (capped at MAX_HELD_TOKENS)
         for (uint256 i = 0; i < weights.length; i++) {
+            if (heldTokens.length >= MAX_HELD_TOKENS) break;
             if (weights[i].weightBps > 0 && !isHeldToken[weights[i].token]) {
                 heldTokens.push(weights[i].token);
                 isHeldToken[weights[i].token] = true;
             }
         }
 
-        // Preserve tokens with non-zero balances even if they left target weights.
-        // This prevents orphaning value from the NAV calculation.
+        // Preserve old tokens with non-dust balances, up to the cap.
+        // Tokens below DUST_THRESHOLD in base value are dropped to prevent
+        // unbounded array growth from residual swap dust.
         for (uint256 i = 0; i < oldTokens.length; i++) {
-            if (!isHeldToken[oldTokens[i]] && IERC20(oldTokens[i]).balanceOf(address(this)) > 0) {
-                heldTokens.push(oldTokens[i]);
-                isHeldToken[oldTokens[i]] = true;
+            if (heldTokens.length >= MAX_HELD_TOKENS) break;
+            if (!isHeldToken[oldTokens[i]]) {
+                uint256 val = _tokenValueInBase(oldTokens[i]);
+                if (val > DUST_THRESHOLD) {
+                    heldTokens.push(oldTokens[i]);
+                    isHeldToken[oldTokens[i]] = true;
+                }
             }
         }
     }

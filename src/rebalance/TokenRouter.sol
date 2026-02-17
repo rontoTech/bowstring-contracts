@@ -44,6 +44,12 @@ contract MockTokenRouter is ITokenRouter, Ownable, ReentrancyGuard {
         emit PriceUpdated(token, priceUsd18);
     }
 
+    /// @notice Clear a token price (testnet only — simulates oracle failure)
+    function clearTokenPrice(address token) external onlyOwner {
+        delete tokenPrices[token];
+        emit PriceUpdated(token, 0);
+    }
+
     function setTokenPricesBatch(address[] calldata tokens, uint256[] calldata prices) external onlyOwner {
         require(tokens.length == prices.length, "MockTokenRouter: length mismatch");
         for (uint256 i = 0; i < tokens.length; i++) {

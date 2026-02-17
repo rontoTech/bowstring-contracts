@@ -49,6 +49,7 @@ contract FeeManager is Ownable {
     // --- Accumulated fees (base asset amounts from entry/exit fees) ---
     mapping(address => uint256) public accumulatedProtocolFees;
     mapping(address => uint256) public accumulatedCuratorFees; // curator address => fees
+    uint256 public totalAccumulatedCuratorFees; // running total of all uncollected curator fees
 
     // --- Authorized callers (factories, admin scripts) ---
     mapping(address => bool) public authorizedCallers;
@@ -114,8 +115,10 @@ contract FeeManager is Ownable {
         emit BaseAssetUpdated(_baseAsset);
     }
 
-    /// @notice Configure fees for a specific vault (called by VaultFactory on creation)
+    /// @notice Configure fees for a specific vault (called by VaultFactory on creation).
+    ///         Can only be called once per vault to prevent retroactive fee manipulation.
     function configureVaultFees(address vault, uint16 curatorShareBps, address curator) external onlyAuthorized {
+        require(!vaultFees[vault].isConfigured, "FeeManager: vault fees already configured");
         require(
             curatorShareBps <= BPS_DENOMINATOR - MIN_PROTOCOL_SHARE_BPS, "FeeManager: curator share too high"
         );
@@ -169,6 +172,7 @@ contract FeeManager is Ownable {
             curatorAmount = (totalFeeAmount * config.curatorShareBps) / BPS_DENOMINATOR;
             protocolAmount = totalFeeAmount - curatorAmount;
             accumulatedCuratorFees[config.curator] += curatorAmount;
+            totalAccumulatedCuratorFees += curatorAmount;
         }
 
         accumulatedProtocolFees[protocolTreasury] += protocolAmount;
@@ -192,18 +196,19 @@ contract FeeManager is Ownable {
         uint256 amount = accumulatedCuratorFees[msg.sender];
         require(amount > 0, "FeeManager: no fees to collect");
         accumulatedCuratorFees[msg.sender] = 0;
+        totalAccumulatedCuratorFees -= amount;
 
         baseAsset.safeTransfer(msg.sender, amount);
 
         emit CuratorFeesCollected(msg.sender, amount);
     }
 
-    /// @notice Emergency rescue for any ERC-20 accidentally sent to this contract
+    /// @notice Emergency rescue for any ERC-20 accidentally sent to this contract.
+    ///         Protects both protocol AND curator accumulated fees from being drained.
     function rescueToken(address token, address to, uint256 amount) external onlyOwner {
         require(to != address(0), "FeeManager: zero address");
-        // Prevent draining accumulated base asset fees
         if (token == address(baseAsset)) {
-            uint256 reservedFees = accumulatedProtocolFees[protocolTreasury];
+            uint256 reservedFees = accumulatedProtocolFees[protocolTreasury] + totalAccumulatedCuratorFees;
             uint256 contractBalance = baseAsset.balanceOf(address(this));
             require(amount <= contractBalance - reservedFees, "FeeManager: would drain reserved fees");
         }

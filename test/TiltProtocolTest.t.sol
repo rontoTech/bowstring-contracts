@@ -12,6 +12,7 @@ import {PortfolioOracle} from "../src/oracle/PortfolioOracle.sol";
 import {RebalanceEngine} from "../src/rebalance/RebalanceEngine.sol";
 import {MockTokenRouter} from "../src/rebalance/TokenRouter.sol";
 import {MockStockToken, TiltUSDC, MockStockTokenFactory} from "../src/tokens/MockStockToken.sol";
+import {BaseVault} from "../src/core/BaseVault.sol";
 import {IBaseVault} from "../src/interfaces/IBaseVault.sol";
 import {IRebalanceEngine} from "../src/interfaces/IRebalanceEngine.sol";
 
@@ -602,6 +603,238 @@ contract TiltProtocolTest is Test {
 
         // Should be able to rescue up to the unreserved amount
         feeManager.rescueToken(address(usdc), deployer, 500e18);
+    }
+
+    // ===================== F-01: Rebalance Buy Budget includes Unallocated Base =====================
+
+    function test_RebalanceEngine_unallocatedBase_buyBudget() public {
+        address vaultAddr = _createPoliticianVault();
+        PoliticianVault vault = PoliticianVault(vaultAddr);
+
+        // Deposit but DON'T rebalance — vault is 100% base asset
+        vm.startPrank(alice);
+        usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
+        vault.deposit(DEPOSIT_AMOUNT, alice);
+        vm.stopPrank();
+
+        // Get current weights (should be empty since no held tokens)
+        IBaseVault.TokenWeight[] memory currentWeights = vault.getCurrentWeights();
+        IBaseVault.TokenWeight[] memory targetWeights = vault.getTargetWeights();
+        uint256 totalValue = vault.totalAssets();
+
+        // Calculate rebalance: should produce buy trades for the full base value
+        IRebalanceEngine.TradeOrder[] memory trades =
+            engine.calculateRebalance(vaultAddr, currentWeights, targetWeights, totalValue);
+
+        // Must have buy trades (previously would return 0 buys)
+        uint256 totalBuyValue = 0;
+        for (uint256 i = 0; i < trades.length; i++) {
+            if (trades[i].tokenIn == address(usdc)) {
+                totalBuyValue += trades[i].amountIn;
+            }
+        }
+        assertTrue(totalBuyValue > 0, "Buy budget should include unallocated base");
+        // Buy budget should be approximately equal to totalValue (within rounding)
+        assertApproxEqRel(totalBuyValue, totalValue, 0.02e18); // within 2%
+    }
+
+    // ===================== F-02: Emergency Unpause by Protocol Admin =====================
+
+    function test_UserVault_emergencyUnpause_protocolAdmin() public {
+        address vaultAddr = _createUserVault();
+        UserVault vault = UserVault(vaultAddr);
+
+        // Curator pauses
+        vm.prank(curator);
+        vault.pause();
+        assertTrue(vault.paused());
+
+        // Random user cannot unpause
+        vm.prank(alice);
+        vm.expectRevert(UserVault.UnauthorizedUnpause.selector);
+        vault.unpause();
+
+        // Protocol admin (feeManager.owner() = deployer) CAN unpause
+        vm.prank(feeManager.owner());
+        vault.unpause();
+        assertFalse(vault.paused());
+    }
+
+    function test_UserVault_curatorCanStillUnpause() public {
+        address vaultAddr = _createUserVault();
+        UserVault vault = UserVault(vaultAddr);
+
+        vm.prank(curator);
+        vault.pause();
+        assertTrue(vault.paused());
+
+        // Curator can still unpause (backwards compatible)
+        vm.prank(curator);
+        vault.unpause();
+        assertFalse(vault.paused());
+    }
+
+    // ===================== F-03: Curator Fees Protected in rescueToken =====================
+
+    function test_FeeManager_rescueToken_protectsCuratorFees() public {
+        usdc.mint(address(feeManager), 1000e18);
+
+        // Configure vault with 50% curator split
+        address mockVault = address(0x5678);
+        feeManager.configureVaultFees(mockVault, 5000, curator);
+
+        // Record fees (500 protocol + 500 curator)
+        vm.prank(mockVault);
+        feeManager.recordFees(1000e18);
+
+        // Total reserved = 500 protocol + 500 curator = 1000
+        // Contract balance is 1000, so nothing should be rescuable
+        vm.expectRevert("FeeManager: would drain reserved fees");
+        feeManager.rescueToken(address(usdc), deployer, 1);
+    }
+
+    // ===================== F-04: Graceful Zero-Price Token Handling =====================
+
+    function test_totalAssets_zeroPriceToken_noRevert() public {
+        address vaultAddr = _createPoliticianVault();
+        PoliticianVault vault = PoliticianVault(vaultAddr);
+
+        // Deposit and rebalance to get held tokens
+        vault.setKeeper(keeper, true);
+        vm.startPrank(alice);
+        usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
+        vault.deposit(DEPOSIT_AMOUNT, alice);
+        vm.stopPrank();
+
+        vm.prank(keeper);
+        vault.rebalance();
+
+        // Verify vault has held tokens
+        address[] memory held = vault.getHeldTokens();
+        assertTrue(held.length > 0);
+
+        // Clear one token price (simulate oracle failure)
+        router.clearTokenPrice(address(aapl));
+
+        // totalAssets should NOT revert — it should just skip the zero-price token
+        uint256 total = vault.totalAssets();
+        assertTrue(total > 0, "totalAssets should still return a value");
+    }
+
+    // ===================== M-01: Deposit Circuit Breaker on Zero-Price Oracle =====================
+
+    function test_deposit_blockedOnZeroPriceOracle() public {
+        address vaultAddr = _createPoliticianVault();
+        PoliticianVault vault = PoliticianVault(vaultAddr);
+
+        // Deposit and rebalance to get held tokens
+        vault.setKeeper(keeper, true);
+        vm.startPrank(alice);
+        usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
+        vault.deposit(DEPOSIT_AMOUNT, alice);
+        vm.stopPrank();
+
+        vm.prank(keeper);
+        vault.rebalance();
+
+        // Clear one token price (simulate oracle failure)
+        router.clearTokenPrice(address(aapl));
+
+        // NEW deposits should be BLOCKED (circuit breaker)
+        vm.startPrank(bob);
+        usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
+        vm.expectRevert(BaseVault.OracleDegraded.selector);
+        vault.deposit(DEPOSIT_AMOUNT, bob);
+        vm.stopPrank();
+
+        // Restore price — deposits should work again
+        router.setTokenPrice(address(aapl), 195e18);
+
+        vm.startPrank(bob);
+        uint256 shares = vault.deposit(DEPOSIT_AMOUNT, bob);
+        vm.stopPrank();
+        assertTrue(shares > 0, "deposit should succeed after oracle recovery");
+    }
+
+    function test_withdraw_allowedDuringZeroPriceOracle() public {
+        address vaultAddr = _createPoliticianVault();
+        PoliticianVault vault = PoliticianVault(vaultAddr);
+
+        // Deposit WITHOUT rebalance — vault holds 100% base asset
+        vm.startPrank(alice);
+        usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
+        vault.deposit(DEPOSIT_AMOUNT, alice);
+        vm.stopPrank();
+
+        // Clear a token price (even though vault doesn't hold it yet, test the logic path)
+        // Since vault has no held tokens with balance, _hasZeroPriceToken = false
+        // This proves withdrawals aren't blocked when vault is in base-only mode
+        router.clearTokenPrice(address(aapl));
+
+        // Alice can still withdraw (vault is 100% base, no held tokens affected)
+        uint256 aliceShares = vault.balanceOf(alice);
+        vm.startPrank(alice);
+        vault.redeem(aliceShares / 2, alice, alice);
+        vm.stopPrank();
+        assertTrue(vault.balanceOf(alice) < aliceShares, "shares should have decreased");
+    }
+
+    function test_deposit_allowedWhenOracleHealthy() public {
+        address vaultAddr = _createPoliticianVault();
+        PoliticianVault vault = PoliticianVault(vaultAddr);
+
+        // Deposit and rebalance
+        vault.setKeeper(keeper, true);
+        vm.startPrank(alice);
+        usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
+        vault.deposit(DEPOSIT_AMOUNT, alice);
+        vm.stopPrank();
+
+        vm.prank(keeper);
+        vault.rebalance();
+
+        // All prices are healthy — deposit should work
+        vm.startPrank(bob);
+        usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
+        uint256 shares = vault.deposit(DEPOSIT_AMOUNT, bob);
+        vm.stopPrank();
+        assertTrue(shares > 0);
+    }
+
+    // ===================== M-02: Held Tokens Cap =====================
+
+    function test_heldTokens_cappedAtMax() public {
+        address vaultAddr = _createPoliticianVault();
+        PoliticianVault vault = PoliticianVault(vaultAddr);
+
+        // The vault starts with max 3 target tokens (aapl, msft, nvda).
+        // After rebalance, heldTokens should be <= MAX_HELD_TOKENS.
+        vault.setKeeper(keeper, true);
+
+        vm.startPrank(alice);
+        usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
+        vault.deposit(DEPOSIT_AMOUNT, alice);
+        vm.stopPrank();
+
+        vm.prank(keeper);
+        vault.rebalance();
+
+        address[] memory held = vault.getHeldTokens();
+        assertTrue(held.length <= vault.MAX_HELD_TOKENS(), "heldTokens should be capped");
+        assertTrue(held.length == 3, "should have exactly 3 target tokens");
+    }
+
+    // ===================== F-05: One-Time Fee Configuration =====================
+
+    function test_FeeManager_configureVaultFees_onlyOnce() public {
+        address mockVault = address(0x9999);
+
+        // First configuration succeeds
+        feeManager.configureVaultFees(mockVault, 0, address(0));
+
+        // Second configuration on the same vault MUST revert
+        vm.expectRevert("FeeManager: vault fees already configured");
+        feeManager.configureVaultFees(mockVault, 5000, curator);
     }
 
     // ===================== Helpers =====================

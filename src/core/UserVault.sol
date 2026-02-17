@@ -62,6 +62,7 @@ contract UserVault is BaseVault {
     error NoPendingChange();
     error TimeLockNotExpired();
     error UnauthorizedRebalance();
+    error UnauthorizedUnpause();
 
     modifier onlyCurator() {
         if (msg.sender != curator) revert OnlyCurator();
@@ -328,8 +329,13 @@ contract UserVault is BaseVault {
         _pause();
     }
 
-    /// @notice Curator can unpause vault operations
-    function unpause() external override onlyCurator {
+    /// @notice Emergency unpause — callable by curator OR protocol admin.
+    ///         This prevents permanent fund lock if the curator abandons the vault
+    ///         or loses access while the vault is paused.
+    function unpause() external override {
+        if (msg.sender != curator && msg.sender != feeManager.owner()) {
+            revert UnauthorizedUnpause();
+        }
         _unpause();
     }
 

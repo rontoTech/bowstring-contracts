@@ -69,7 +69,10 @@ contract RebalanceEngine is IRebalanceEngine, Ownable {
 
     // ===================== Rebalance Calculation =====================
 
-    /// @notice Calculate trades needed to move from current to target weights
+    /// @notice Calculate trades needed to move from current to target weights.
+    ///         The buy budget includes both sell proceeds AND unallocated base asset
+    ///         (the portion of vault value not represented by any current position).
+    ///         This ensures initial allocation from 100% base works correctly.
     function calculateRebalance(
         address vault,
         IBaseVault.TokenWeight[] calldata currentWeights,
@@ -81,6 +84,12 @@ contract RebalanceEngine is IRebalanceEngine, Ownable {
         uint256 maxTrades = currentWeights.length + targetWeights.length;
         TradeOrder[] memory tempTrades = new TradeOrder[](maxTrades);
         uint256 tradeCount = 0;
+
+        // Sum current weight BPS to determine how much is unallocated (held as base asset)
+        uint256 totalCurrentBps = 0;
+        for (uint256 i = 0; i < currentWeights.length; i++) {
+            totalCurrentBps += currentWeights[i].weightBps;
+        }
 
         // Find tokens to sell (overweight) and accumulate available base from sells
         uint256 availableBaseFromSells = 0;
@@ -106,6 +115,16 @@ contract RebalanceEngine is IRebalanceEngine, Ownable {
             }
         }
 
+        // Unallocated base = vault value not represented by any current token position.
+        // When vault is 100% base asset, totalCurrentBps = 0, so unallocated = totalValue.
+        // When fully allocated, totalCurrentBps ≈ 10000, so unallocated ≈ 0.
+        uint256 unallocatedBase = totalCurrentBps < 10000
+            ? (totalValue * (10000 - totalCurrentBps)) / 10000
+            : 0;
+
+        // Total budget for buying = sell proceeds + unallocated base asset
+        uint256 availableForBuys = availableBaseFromSells + unallocatedBase;
+
         // First pass: compute total deficit BPS across all underweight tokens
         uint256 totalDeficitBps = 0;
         for (uint256 i = 0; i < targetWeights.length; i++) {
@@ -115,14 +134,14 @@ contract RebalanceEngine is IRebalanceEngine, Ownable {
             }
         }
 
-        // Find tokens to buy (underweight). Buy amounts are scaled from available base from sells
-        // (not theoretical totalValue) so buys never exceed actual sell proceeds.
+        // Buy underweight tokens. Budget is split proportionally across all deficit positions.
+        // This ensures buys never exceed available funds (sells + unallocated base).
         for (uint256 i = 0; i < targetWeights.length; i++) {
             uint16 currentBps = _findWeight(targetWeights[i].token, currentWeights);
             if (targetWeights[i].weightBps > currentBps) {
                 uint256 deficitBps = targetWeights[i].weightBps - currentBps;
                 uint256 buyValue =
-                    totalDeficitBps > 0 ? (availableBaseFromSells * deficitBps) / totalDeficitBps : 0;
+                    totalDeficitBps > 0 ? (availableForBuys * deficitBps) / totalDeficitBps : 0;
                 if (buyValue > 0) {
                     uint256 expectedOut = tokenRouter.getQuote(baseAsset, targetWeights[i].token, buyValue);
                     uint256 minOut = (expectedOut * (10000 - maxSlippageBps)) / 10000;
