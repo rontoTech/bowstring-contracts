@@ -8,6 +8,7 @@ import {IBaseVault} from "../interfaces/IBaseVault.sol";
 /// @title PortfolioOracle
 /// @notice Stores politician portfolio target weights, updated by Chainlink DON or authorized reporters.
 ///         Supports historical snapshots for analytics.
+///         Includes configurable staleness check for data freshness.
 contract PortfolioOracle is IPortfolioOracle, Ownable {
     // --- Types ---
     struct PortfolioSnapshot {
@@ -16,7 +17,6 @@ contract PortfolioOracle is IPortfolioOracle, Ownable {
     }
 
     // --- Storage ---
-    // Current portfolio for each politician
     mapping(bytes32 => IBaseVault.TokenWeight[]) private _currentPortfolios;
     mapping(bytes32 => uint256) private _lastUpdated;
 
@@ -31,14 +31,19 @@ contract PortfolioOracle is IPortfolioOracle, Ownable {
     // Authorized reporters (Chainlink DON, keepers)
     mapping(address => bool) public authorizedReporters;
 
+    // Staleness check (0 = disabled)
+    uint256 public maxStaleness;
+
     // --- Events ---
     event ReporterUpdated(address indexed reporter, bool authorized);
     event PoliticianRegistered(bytes32 indexed politicianId, string metadataURI);
+    event MaxStalenessUpdated(uint256 newMaxStaleness);
 
     // --- Errors ---
     error UnauthorizedReporter();
     error InvalidWeights();
     error PoliticianNotRegistered();
+    error StaleData(bytes32 politicianId, uint256 lastUpdate, uint256 maxAge);
 
     constructor() Ownable(msg.sender) {}
 
@@ -47,6 +52,12 @@ contract PortfolioOracle is IPortfolioOracle, Ownable {
     function setReporter(address reporter, bool authorized) external onlyOwner {
         authorizedReporters[reporter] = authorized;
         emit ReporterUpdated(reporter, authorized);
+    }
+
+    /// @notice Set the maximum allowed age for oracle data (0 = disabled)
+    function setMaxStaleness(uint256 _maxStaleness) external onlyOwner {
+        maxStaleness = _maxStaleness;
+        emit MaxStalenessUpdated(_maxStaleness);
     }
 
     /// @notice Register a new politician in the oracle
@@ -62,7 +73,6 @@ contract PortfolioOracle is IPortfolioOracle, Ownable {
     // ===================== Portfolio Updates =====================
 
     /// @notice Update portfolio weights for a politician
-    /// @dev Callable by authorized reporters (Chainlink DON) or owner
     function updatePortfolio(bytes32 politicianId, IBaseVault.TokenWeight[] calldata weights) external override {
         if (!authorizedReporters[msg.sender] && msg.sender != owner()) {
             revert UnauthorizedReporter();
@@ -98,7 +108,19 @@ contract PortfolioOracle is IPortfolioOracle, Ownable {
 
     // ===================== Views =====================
 
-    function getPortfolio(bytes32 politicianId) external view override returns (IBaseVault.TokenWeight[] memory) {
+    /// @notice Get the target portfolio weights, with optional staleness check
+    function getPortfolio(bytes32 politicianId)
+        external
+        view
+        override
+        returns (IBaseVault.TokenWeight[] memory)
+    {
+        // Staleness check (skip if maxStaleness is 0 or data was never set)
+        if (maxStaleness > 0 && _lastUpdated[politicianId] > 0) {
+            if (block.timestamp > _lastUpdated[politicianId] + maxStaleness) {
+                revert StaleData(politicianId, _lastUpdated[politicianId], maxStaleness);
+            }
+        }
         return _currentPortfolios[politicianId];
     }
 

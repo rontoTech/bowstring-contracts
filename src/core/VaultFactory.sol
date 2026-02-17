@@ -9,15 +9,17 @@ import {FeeManager} from "./FeeManager.sol";
 import {IBaseVault} from "../interfaces/IBaseVault.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {RebalanceEngine} from "../rebalance/RebalanceEngine.sol";
 
 /// @title VaultFactory
 /// @notice Factory for creating PoliticianVaults (permissioned) and UserVaults (permissionless).
-///         Uses direct deployment. Registers all vaults in VaultRegistry.
+///         All vaults receive donation attack protection via dead shares.
+///         Vaults are auto-registered in VaultRegistry and authorized on RebalanceEngine.
 contract VaultFactory is Ownable {
     using SafeERC20 for IERC20;
 
     // --- Immutables / Config ---
-    address public baseAsset; // bowUSDC or main deposit token
+    address public baseAsset; // tiltUSDC or main deposit token
     FeeManager public feeManager;
     VaultRegistry public registry;
     address public rebalanceEngine;
@@ -30,6 +32,9 @@ contract VaultFactory is Ownable {
     uint256 public defaultTimeLock; // default time-lock for weight changes (24h)
     uint256 public defaultMinRebalanceInterval; // default min rebalance interval (4h)
 
+    // --- Dead shares constant ---
+    uint256 public constant DEAD_SHARE_AMOUNT = 1e3; // negligible: 0.000000000000001 tiltUSDC
+
     // --- Token whitelist ---
     mapping(address => bool) public approvedTokens;
     address[] public approvedTokenList;
@@ -39,12 +44,8 @@ contract VaultFactory is Ownable {
     mapping(address => bool) public isVault;
 
     // --- Events ---
-    event PoliticianVaultCreated(
-        address indexed vault, bytes32 indexed politicianId, string name, string symbol
-    );
-    event UserVaultCreated(
-        address indexed vault, address indexed curator, string name, string symbol
-    );
+    event PoliticianVaultCreated(address indexed vault, bytes32 indexed politicianId, string name, string symbol);
+    event UserVaultCreated(address indexed vault, address indexed curator, string name, string symbol);
     event TokenApprovalUpdated(address indexed token, bool approved);
     event CreationFeeUpdated(uint256 newFee);
     event MinSeedDepositUpdated(uint256 newMin);
@@ -75,7 +76,7 @@ contract VaultFactory is Ownable {
         defaultOracle = _defaultOracle;
 
         vaultCreationFee = 0.01 ether;
-        minSeedDeposit = 100e18; // 100 bowUSDC (18 decimals)
+        minSeedDeposit = 100e18; // 100 tiltUSDC (18 decimals)
         defaultTimeLock = 24 hours;
         defaultMinRebalanceInterval = 4 hours;
     }
@@ -85,7 +86,26 @@ contract VaultFactory is Ownable {
     function setApprovedToken(address token, bool approved) external onlyOwner {
         approvedTokens[token] = approved;
         if (approved) {
-            approvedTokenList.push(token);
+            // Only add if not already in the list
+            bool found = false;
+            for (uint256 i = 0; i < approvedTokenList.length; i++) {
+                if (approvedTokenList[i] == token) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                approvedTokenList.push(token);
+            }
+        } else {
+            // Remove from list when disapproved
+            for (uint256 i = 0; i < approvedTokenList.length; i++) {
+                if (approvedTokenList[i] == token) {
+                    approvedTokenList[i] = approvedTokenList[approvedTokenList.length - 1];
+                    approvedTokenList.pop();
+                    break;
+                }
+            }
         }
         emit TokenApprovalUpdated(token, approved);
     }
@@ -94,7 +114,24 @@ contract VaultFactory is Ownable {
         for (uint256 i = 0; i < tokens.length; i++) {
             approvedTokens[tokens[i]] = approved;
             if (approved) {
-                approvedTokenList.push(tokens[i]);
+                bool found = false;
+                for (uint256 j = 0; j < approvedTokenList.length; j++) {
+                    if (approvedTokenList[j] == tokens[i]) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    approvedTokenList.push(tokens[i]);
+                }
+            } else {
+                for (uint256 j = 0; j < approvedTokenList.length; j++) {
+                    if (approvedTokenList[j] == tokens[i]) {
+                        approvedTokenList[j] = approvedTokenList[approvedTokenList.length - 1];
+                        approvedTokenList.pop();
+                        break;
+                    }
+                }
             }
             emit TokenApprovalUpdated(tokens[i], approved);
         }
@@ -130,27 +167,24 @@ contract VaultFactory is Ownable {
 
     // ===================== Permissioned: Politician Vaults =====================
 
-    /// @notice Create a politician vault (admin only)
+    /// @notice Create a politician vault (admin only) with donation attack protection
+    /// @param seedDeposit Amount of base asset to seed (pulled from msg.sender)
     function createPoliticianVault(
         bytes32 politicianId,
         string calldata name,
         string calldata symbol,
         address oracle,
-        string calldata metadataURI
+        string calldata metadataURI,
+        uint256 seedDeposit
     ) external onlyOwner returns (address vault) {
+        require(seedDeposit >= minSeedDeposit, "VaultFactory: insufficient seed");
+
         address oracleAddr = oracle != address(0) ? oracle : defaultOracle;
         require(oracleAddr != address(0), "VaultFactory: no oracle");
 
         PoliticianVault pVault = new PoliticianVault(
-            name,
-            symbol,
-            politicianId,
-            baseAsset,
-            oracleAddr,
-            address(feeManager),
-            rebalanceEngine,
-            tokenRouter,
-            msg.sender
+            name, symbol, politicianId, baseAsset, oracleAddr,
+            address(feeManager), rebalanceEngine, tokenRouter, msg.sender
         );
 
         vault = address(pVault);
@@ -162,19 +196,22 @@ contract VaultFactory is Ownable {
         // Register in registry
         registry.registerVault(vault, VaultRegistry.VaultType.POLITICIAN, address(0), metadataURI);
 
+        // Authorize vault on rebalance engine
+        RebalanceEngine(rebalanceEngine).setVaultAuthorized(vault, true);
+
+        // Seed deposit with dead shares (donation attack protection)
+        IERC20(baseAsset).safeTransferFrom(msg.sender, address(this), seedDeposit);
+        IERC20(baseAsset).approve(vault, seedDeposit);
+
+        pVault.deposit(DEAD_SHARE_AMOUNT, address(1));
+        pVault.deposit(seedDeposit - DEAD_SHARE_AMOUNT, msg.sender);
+
         emit PoliticianVaultCreated(vault, politicianId, name, symbol);
     }
 
     // ===================== Permissionless: User Vaults =====================
 
     /// @notice Create a user vault (anyone can call)
-    /// @param name Vault name (e.g., "Tech Growth Strategy")
-    /// @param symbol Vault share symbol (e.g., "vTECH")
-    /// @param tokens Initial token addresses for the portfolio
-    /// @param weights Initial weights in basis points (must sum to 10000)
-    /// @param curatorFeeBps Curator's share of fees in basis points (max 8000 = 80%)
-    /// @param seedDeposit Amount of base asset to seed the vault with
-    /// @param metadataURI IPFS URI for vault description/avatar
     function createUserVault(
         string calldata name,
         string calldata symbol,
@@ -203,8 +240,7 @@ contract VaultFactory is Ownable {
 
         // Validate curator fee
         require(
-            curatorFeeBps <= 10000 - feeManager.MIN_PROTOCOL_SHARE_BPS(),
-            "VaultFactory: curator fee too high"
+            curatorFeeBps <= 10000 - feeManager.MIN_PROTOCOL_SHARE_BPS(), "VaultFactory: curator fee too high"
         );
 
         // Build initial weights array
@@ -237,17 +273,14 @@ contract VaultFactory is Ownable {
         // Register in registry
         registry.registerVault(vault, VaultRegistry.VaultType.USER, msg.sender, metadataURI);
 
-        // --- Seed deposit: pull bowUSDC to factory, then deposit through vault ---
-        // This properly mints shares to the creator instead of a bare transfer.
+        // Authorize vault on rebalance engine
+        RebalanceEngine(rebalanceEngine).setVaultAuthorized(vault, true);
+
+        // Seed deposit with dead shares (donation attack protection)
         IERC20(baseAsset).safeTransferFrom(msg.sender, address(this), seedDeposit);
         IERC20(baseAsset).approve(vault, seedDeposit);
 
-        // Dead shares: tiny first deposit to address(1) to prevent donation/inflation attack.
-        // With 1e3 dead shares, an attacker must donate >1000x the victim's deposit to steal value.
-        uint256 DEAD_SHARE_AMOUNT = 1e3; // negligible: 0.000000000000001 bowUSDC
         uVault.deposit(DEAD_SHARE_AMOUNT, address(1));
-
-        // Real seed deposit — mints shares to the vault creator
         uVault.deposit(seedDeposit - DEAD_SHARE_AMOUNT, msg.sender);
 
         // Forward creation fee to protocol treasury

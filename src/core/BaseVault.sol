@@ -6,6 +6,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IBaseVault} from "../interfaces/IBaseVault.sol";
 import {IRebalanceEngine} from "../interfaces/IRebalanceEngine.sol";
@@ -14,33 +15,38 @@ import {FeeManager} from "./FeeManager.sol";
 
 /// @title BaseVault
 /// @notice Abstract ERC-4626-style vault holding a basket of stock tokens.
-///         Deposits/withdraws are denominated in a single base asset (bowUSDC).
+///         Deposits/withdraws are denominated in a single base asset (tiltUSDC).
 ///         Uses the TokenRouter as a price oracle for accurate NAV calculation.
+///         Management/performance fees collected via share dilution to fee recipients.
 ///         Sub-classes override _getTargetWeights() to source allocations.
-abstract contract BaseVault is ERC20, ReentrancyGuard {
+abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
     using Math for uint256;
 
     // --- Core ---
-    IERC20 public baseAsset; // deposit/withdraw token (bowUSDC) — mutable by owner
+    IERC20 public baseAsset; // deposit/withdraw token (tiltUSDC) — mutable by admin
     FeeManager public immutable feeManager;
     IRebalanceEngine public rebalanceEngine;
     ITokenRouter public tokenRouter; // price oracle + swap router
 
-    // --- State ---
+    // --- Fee State ---
     uint256 public highWaterMark; // per-share HWM for performance fees
     uint256 public lastFeeAccrualTimestamp;
 
     // --- Holdings ---
     address[] public heldTokens;
-    mapping(address => uint256) public tokenBalances;
     mapping(address => bool) public isHeldToken;
+
+    // --- Slippage ---
+    uint256 public withdrawalSlippageBps = 100; // 1% default
 
     // --- Events ---
     event Deposited(address indexed depositor, uint256 assets, uint256 shares);
     event Withdrawn(address indexed withdrawer, uint256 assets, uint256 shares);
     event RebalanceTriggered(uint256 timestamp);
     event BaseAssetUpdated(address indexed oldAsset, address indexed newAsset);
+    event FeeSharesMinted(uint256 feeShares, address indexed recipient);
+    event WithdrawalSlippageUpdated(uint256 newSlippageBps);
 
     // --- Errors ---
     error ZeroAmount();
@@ -68,18 +74,27 @@ abstract contract BaseVault is ERC20, ReentrancyGuard {
     // ===================== ERC-4626 Core =====================
 
     /// @notice Deposit base assets and receive vault shares
-    function deposit(uint256 assets, address receiver) public nonReentrant returns (uint256 shares) {
+    function deposit(uint256 assets, address receiver)
+        public
+        nonReentrant
+        whenNotPaused
+        returns (uint256 shares)
+    {
         shares = _deposit(assets, receiver);
     }
 
     /// @notice Deposit base assets, receive shares, and immediately rebalance into target portfolio
-    function depositAndRebalance(uint256 assets, address receiver) external nonReentrant returns (uint256 shares) {
+    function depositAndRebalance(uint256 assets, address receiver)
+        external
+        nonReentrant
+        whenNotPaused
+        returns (uint256 shares)
+    {
         shares = _deposit(assets, receiver);
         _executeRebalance();
     }
 
-    /// @notice Deposit using EIP-2612 permit — approve + deposit in a single transaction.
-    ///         The user signs a permit off-chain (gasless), and the vault calls permit() then deposit().
+    /// @notice Deposit using EIP-2612 permit — approve + deposit in a single transaction
     function depositWithPermit(
         uint256 assets,
         address receiver,
@@ -87,21 +102,12 @@ abstract contract BaseVault is ERC20, ReentrancyGuard {
         uint8 v,
         bytes32 r,
         bytes32 s
-    ) external nonReentrant returns (uint256 shares) {
-        // Execute the permit to set allowance
-        IERC20Permit(address(baseAsset)).permit(
-            msg.sender,
-            address(this),
-            assets,
-            deadline,
-            v,
-            r,
-            s
-        );
+    ) external nonReentrant whenNotPaused returns (uint256 shares) {
+        IERC20Permit(address(baseAsset)).permit(msg.sender, address(this), assets, deadline, v, r, s);
         shares = _deposit(assets, receiver);
     }
 
-    /// @dev Internal deposit logic shared by deposit() and depositAndRebalance()
+    /// @dev Internal deposit logic shared by all deposit variants
     function _deposit(uint256 assets, address receiver) internal returns (uint256 shares) {
         if (assets == 0) revert ZeroAmount();
         if (receiver == address(0)) revert ZeroAddress();
@@ -120,7 +126,7 @@ abstract contract BaseVault is ERC20, ReentrancyGuard {
         // Transfer assets from depositor
         baseAsset.safeTransferFrom(msg.sender, address(this), assets);
 
-        // Record fee
+        // Record entry fee
         if (feeAmount > 0) {
             baseAsset.safeTransfer(address(feeManager), feeAmount);
             feeManager.recordFees(feeAmount);
@@ -132,7 +138,12 @@ abstract contract BaseVault is ERC20, ReentrancyGuard {
     }
 
     /// @notice Withdraw base assets by burning vault shares
-    function withdraw(uint256 assets, address receiver, address owner) external nonReentrant returns (uint256 shares) {
+    function withdraw(uint256 assets, address receiver, address owner)
+        external
+        nonReentrant
+        whenNotPaused
+        returns (uint256 shares)
+    {
         if (assets == 0) revert ZeroAmount();
         if (receiver == address(0)) revert ZeroAddress();
 
@@ -150,7 +161,7 @@ abstract contract BaseVault is ERC20, ReentrancyGuard {
         uint256 feeAmount = (assets * exitFeeBps) / 10000;
         uint256 netAssets = assets - feeAmount;
 
-        // Ensure enough base asset liquidity -- sell held tokens if needed
+        // Ensure enough base asset liquidity
         _ensureBaseLiquidity(assets);
 
         _burn(owner, shares);
@@ -168,7 +179,12 @@ abstract contract BaseVault is ERC20, ReentrancyGuard {
     }
 
     /// @notice Redeem shares for base assets
-    function redeem(uint256 shares, address receiver, address owner) external nonReentrant returns (uint256 assets) {
+    function redeem(uint256 shares, address receiver, address owner)
+        external
+        nonReentrant
+        whenNotPaused
+        returns (uint256 assets)
+    {
         if (shares == 0) revert ZeroAmount();
         if (receiver == address(0)) revert ZeroAddress();
 
@@ -216,6 +232,11 @@ abstract contract BaseVault is ERC20, ReentrancyGuard {
         return _convertToAssets(shares);
     }
 
+    /// @notice Current price per share (18 decimal precision)
+    function sharePrice() external view returns (uint256) {
+        return _sharePrice();
+    }
+
     function getTargetWeights() external view returns (IBaseVault.TokenWeight[] memory) {
         return _getTargetWeights();
     }
@@ -249,7 +270,7 @@ abstract contract BaseVault is ERC20, ReentrancyGuard {
     }
 
     function accruedFees() external view returns (uint256) {
-        return _pendingManagementFee();
+        return _pendingManagementFeeShares() + _pendingPerformanceFeeShares();
     }
 
     function getHeldTokens() external view returns (address[] memory) {
@@ -299,10 +320,8 @@ abstract contract BaseVault is ERC20, ReentrancyGuard {
 
     /// @notice Calculate total vault value from actual token balances and prices
     function _totalAssets() internal view returns (uint256 total) {
-        // Base asset balance (bowUSDC sitting in the vault, not yet deployed)
         total = baseAsset.balanceOf(address(this));
 
-        // Value of each held stock token, priced via the router oracle
         if (address(tokenRouter) != address(0)) {
             uint256 basePrice = tokenRouter.getTokenPrice(address(baseAsset));
             if (basePrice > 0) {
@@ -312,8 +331,6 @@ abstract contract BaseVault is ERC20, ReentrancyGuard {
                     if (bal > 0) {
                         uint256 tokenPrice = tokenRouter.getTokenPrice(token);
                         if (tokenPrice > 0) {
-                            // Both bowUSDC and stock tokens are 18 decimals
-                            // value = balance * tokenPrice / basePrice
                             total += (bal * tokenPrice) / basePrice;
                         }
                     }
@@ -337,7 +354,8 @@ abstract contract BaseVault is ERC20, ReentrancyGuard {
 
     // ===================== Liquidity Management =====================
 
-    /// @notice Sell held tokens to ensure enough base asset for a withdrawal
+    /// @notice Sell held tokens to ensure enough base asset for a withdrawal.
+    ///         Uses configurable slippage protection.
     function _ensureBaseLiquidity(uint256 needed) internal {
         uint256 baseBalance = baseAsset.balanceOf(address(this));
         if (baseBalance >= needed) return;
@@ -345,7 +363,6 @@ abstract contract BaseVault is ERC20, ReentrancyGuard {
 
         uint256 deficit = needed - baseBalance;
 
-        // Sell held tokens proportionally to cover the deficit
         uint256 totalHeldValue = _totalAssets() - baseBalance;
         if (totalHeldValue == 0) return;
 
@@ -364,15 +381,17 @@ abstract contract BaseVault is ERC20, ReentrancyGuard {
             if (sellAmount > tokenBal) sellAmount = tokenBal;
             if (sellAmount == 0) continue;
 
-            // Approve and swap
+            // Approve and swap with slippage protection
             IERC20(token).safeIncreaseAllowance(address(rebalanceEngine), sellAmount);
+
+            uint256 minOut = (sellValueBase * (10000 - withdrawalSlippageBps)) / 10000;
 
             IRebalanceEngine.TradeOrder[] memory trades = new IRebalanceEngine.TradeOrder[](1);
             trades[0] = IRebalanceEngine.TradeOrder({
                 tokenIn: token,
                 tokenOut: address(baseAsset),
                 amountIn: sellAmount,
-                minAmountOut: 0 // testnet: no slippage protection
+                minAmountOut: minOut
             });
 
             rebalanceEngine.executeRebalance(address(this), trades);
@@ -381,29 +400,81 @@ abstract contract BaseVault is ERC20, ReentrancyGuard {
 
     // ===================== Fee Logic =====================
 
+    /// @notice Accrue management and performance fees via share dilution.
+    ///         Fee shares are minted directly to protocol treasury and curator.
     function _accrueManagementFee() internal {
-        _pendingManagementFee(); // track for analytics
-        _accruePerformanceFee();
+        if (totalSupply() == 0) {
+            lastFeeAccrualTimestamp = block.timestamp;
+            return;
+        }
+
+        uint256 mgmtShares = _pendingManagementFeeShares();
+        uint256 perfShares = _pendingPerformanceFeeShares();
+        uint256 totalFeeShares = mgmtShares + perfShares;
+
+        if (totalFeeShares > 0) {
+            _mintFeeShares(totalFeeShares);
+        }
+
+        // Update HWM after performance fee collection
+        uint256 currentPrice = _sharePrice();
+        if (currentPrice > highWaterMark) {
+            highWaterMark = currentPrice;
+        }
+
         lastFeeAccrualTimestamp = block.timestamp;
     }
 
-    function _pendingManagementFee() internal view returns (uint256) {
-        uint256 total = _totalAssets();
-        if (total == 0 || lastFeeAccrualTimestamp == 0) return 0;
+    /// @notice Calculate pending management fee as share count
+    function _pendingManagementFeeShares() internal view returns (uint256) {
+        uint256 supply = totalSupply();
+        if (supply == 0 || lastFeeAccrualTimestamp == 0) return 0;
 
         uint256 elapsed = block.timestamp - lastFeeAccrualTimestamp;
-        uint16 mgmtFeeBps = feeManager.getManagementFee(address(this));
+        if (elapsed == 0) return 0;
 
-        // Annual fee prorated: (totalAssets * feeBps * elapsed) / (10000 * 365 days)
-        return (total * mgmtFeeBps * elapsed) / (10000 * 365 days);
+        uint16 mgmtFeeBps = feeManager.getManagementFee(address(this));
+        if (mgmtFeeBps == 0) return 0;
+
+        // Annualized fee prorated: shares = supply * feeBps * elapsed / (BPS * 365 days)
+        return (supply * mgmtFeeBps * elapsed) / (10000 * 365 days);
     }
 
-    function _accruePerformanceFee() internal {
-        if (totalSupply() == 0) return;
+    /// @notice Calculate pending performance fee as share count
+    function _pendingPerformanceFeeShares() internal view returns (uint256) {
+        uint256 supply = totalSupply();
+        if (supply == 0) return 0;
 
-        uint256 currentSharePrice = _sharePrice();
-        if (currentSharePrice > highWaterMark) {
-            highWaterMark = currentSharePrice;
+        uint256 currentPrice = _sharePrice();
+        if (currentPrice <= highWaterMark) return 0;
+
+        uint16 perfFeeBps = feeManager.getPerformanceFee(address(this));
+        if (perfFeeBps == 0) return 0;
+
+        // Performance fee on profit above high-water mark
+        uint256 profit = currentPrice - highWaterMark;
+        return (supply * profit * perfFeeBps) / (currentPrice * 10000);
+    }
+
+    /// @notice Mint fee shares, split between protocol treasury and curator
+    function _mintFeeShares(uint256 totalFeeShares) internal {
+        address protocolRecipient = feeManager.protocolTreasury();
+        FeeManager.VaultFeeConfig memory config = feeManager.getVaultFeeConfig(address(this));
+
+        if (config.curator != address(0) && config.curatorShareBps > 0) {
+            uint256 curatorShares = (totalFeeShares * config.curatorShareBps) / 10000;
+            uint256 protocolShares = totalFeeShares - curatorShares;
+            if (protocolShares > 0) {
+                _mint(protocolRecipient, protocolShares);
+                emit FeeSharesMinted(protocolShares, protocolRecipient);
+            }
+            if (curatorShares > 0) {
+                _mint(config.curator, curatorShares);
+                emit FeeSharesMinted(curatorShares, config.curator);
+            }
+        } else {
+            _mint(protocolRecipient, totalFeeShares);
+            emit FeeSharesMinted(totalFeeShares, protocolRecipient);
         }
     }
 
@@ -451,9 +522,11 @@ abstract contract BaseVault is ERC20, ReentrancyGuard {
     /// @notice Abstract: subclasses provide target portfolio weights
     function _getTargetWeights() internal view virtual returns (IBaseVault.TokenWeight[] memory);
 
+    // --- Abstract admin functions (access control in subclasses) ---
     function setRebalanceEngine(address _engine) external virtual;
-
     function setTokenRouter(address _router) external virtual;
-
     function setBaseAsset(address _baseAsset) external virtual;
+    function setWithdrawalSlippage(uint256 _slippageBps) external virtual;
+    function pause() external virtual;
+    function unpause() external virtual;
 }

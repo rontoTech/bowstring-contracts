@@ -11,16 +11,17 @@ import {PortfolioOracle} from "../src/oracle/PortfolioOracle.sol";
 import {ChainlinkAdapter} from "../src/oracle/ChainlinkAdapter.sol";
 import {RebalanceEngine} from "../src/rebalance/RebalanceEngine.sol";
 import {MockTokenRouter} from "../src/rebalance/TokenRouter.sol";
-import {BowUSDC, MockStockTokenFactory} from "../src/tokens/MockStockToken.sol";
+import {TiltUSDC, MockStockTokenFactory} from "../src/tokens/MockStockToken.sol";
 import {IBaseVault} from "../src/interfaces/IBaseVault.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-/// @title DeployBowstring
-/// @notice Full deployment of Bowstring protocol on Robinhood L2 Testnet.
-///         Creates infrastructure, bow-branded tokens, politician vaults
+/// @title DeployTiltProtocol
+/// @notice Full deployment of Tilt Protocol on Robinhood L2 Testnet.
+///         Creates infrastructure, tilt-branded tokens, politician vaults
 ///         with hardcoded realistic portfolios, and seeds liquidity.
-contract DeployBowstring is Script {
+contract DeployTiltProtocol is Script {
     // Deployed addresses
-    address public bowUsdc;
+    address public tiltUsdc;
     address public feeManager;
     address public registry;
     address public oracle;
@@ -46,12 +47,12 @@ contract DeployBowstring is Script {
 
         vm.startBroadcast(deployerPrivateKey);
 
-        // ========== 1. Deploy BowUSDC (18 decimals, with faucet) ==========
-        BowUSDC _bowUsdc = new BowUSDC();
-        bowUsdc = address(_bowUsdc);
-        console.log("BowUSDC:", bowUsdc);
+        // ========== 1. Deploy TiltUSDC (18 decimals, with faucet) ==========
+        TiltUSDC _tiltUsdc = new TiltUSDC();
+        tiltUsdc = address(_tiltUsdc);
+        console.log("TiltUSDC:", tiltUsdc);
 
-        // ========== 2. Deploy Bow Stock Token Factory ==========
+        // ========== 2. Deploy Tilt Stock Token Factory ==========
         MockStockTokenFactory _tokenFactory = new MockStockTokenFactory();
         tokenFactory = address(_tokenFactory);
         _tokenFactory.deployStandardTokens();
@@ -59,9 +60,12 @@ contract DeployBowstring is Script {
 
         // ========== 3. Deploy Core Infrastructure ==========
 
-        FeeManager _feeManager = new FeeManager(treasury);
+        FeeManager _feeManager = new FeeManager(treasury, tiltUsdc);
         feeManager = address(_feeManager);
         console.log("FeeManager:", feeManager);
+
+        // Set all fees to 0 for testnet simplicity
+        _feeManager.setDefaultFees(0, 0, 0, 0);
 
         VaultRegistry _registry = new VaultRegistry();
         registry = address(_registry);
@@ -75,7 +79,7 @@ contract DeployBowstring is Script {
         router = address(_router);
         console.log("MockTokenRouter:", router);
 
-        RebalanceEngine _engine = new RebalanceEngine(router, bowUsdc);
+        RebalanceEngine _engine = new RebalanceEngine(router, tiltUsdc);
         engine = address(_engine);
         console.log("RebalanceEngine:", engine);
 
@@ -85,9 +89,7 @@ contract DeployBowstring is Script {
 
         // ========== 4. Deploy VaultFactory ==========
 
-        VaultFactory _factory = new VaultFactory(
-            bowUsdc, feeManager, registry, engine, router, oracle
-        );
+        VaultFactory _factory = new VaultFactory(tiltUsdc, feeManager, registry, engine, router, oracle);
         factory = address(_factory);
         console.log("VaultFactory:", factory);
 
@@ -97,9 +99,8 @@ contract DeployBowstring is Script {
         _registry.setRegistrar(factory, true);
         _registry.setRegistrar(deployer, true);
 
-        // FeeManager: authorize factory (but keep deployer as owner for direct vault creation)
-        // We'll transfer ownership after creating politician vaults
-        // For now, deployer owns FeeManager
+        // FeeManager: authorize factory as caller (deployer stays owner)
+        _feeManager.setAuthorizedCaller(factory, true);
 
         // Oracle: authorize adapter and deployer as reporters
         _oracle.setReporter(chainlinkAdapter, true);
@@ -108,14 +109,17 @@ contract DeployBowstring is Script {
         // Router: authorize engine as caller
         _router.setAuthorizedCaller(engine, true);
 
+        // Engine: authorize factory to register vaults
+        _engine.setAuthorizedCaller(factory, true);
+
         // ========== 6. Setup Token Prices in Router ==========
 
-        _router.setTokenPrice(bowUsdc, 1e18); // $1.00
+        _router.setTokenPrice(tiltUsdc, 1e18); // $1.00
 
         MockStockTokenFactory.StockTokenInfo[] memory tokens = _tokenFactory.getDeployedTokens();
         for (uint256 i = 0; i < tokens.length; i++) {
             _router.setTokenPrice(tokens[i].token, tokens[i].initialPrice);
-            _router.setPairSupported(bowUsdc, tokens[i].token, true);
+            _router.setPairSupported(tiltUsdc, tokens[i].token, true);
             _factory.setApprovedToken(tokens[i].token, true);
 
             console.log("Stock Token:", tokens[i].symbol);
@@ -124,14 +128,14 @@ contract DeployBowstring is Script {
 
         // ========== 7. Seed Liquidity ==========
 
-        // Mint bowUSDC to deployer for testing
-        _bowUsdc.mint(deployer, 1_000_000e18); // 1M bowUSDC
+        // Mint tiltUSDC to deployer for vault seeding
+        _tiltUsdc.mint(deployer, 1_000_000e18); // 1M tiltUSDC
 
         // Mint stock tokens to router for swap reserves
         _tokenFactory.mintAllTokens(router, 1_000_000e18); // 1M of each stock
 
-        // Mint bowUSDC to router for swap reserves
-        _bowUsdc.mint(router, 10_000_000e18); // 10M bowUSDC in router
+        // Mint tiltUSDC to router for swap reserves
+        _tiltUsdc.mint(router, 10_000_000e18); // 10M tiltUSDC in router
 
         // ========== 8. Register Politicians & Seed Portfolios ==========
 
@@ -148,67 +152,38 @@ contract DeployBowstring is Script {
         _seedTubervillePortfolio(_oracle, tubervilleId, tokens);
         _seedCrenshawPortfolio(_oracle, crenshawId, tokens);
 
-        // ========== 9. Create Politician Vaults ==========
+        // ========== 9. Create Politician Vaults (via factory, with dead shares) ==========
 
-        // bowPELOSI vault
-        PoliticianVault _pelosiVault = new PoliticianVault(
-            "Bowstring Pelosi Index",
-            "bowPELOSI",
-            pelosiId,
-            bowUsdc,
-            oracle,
-            feeManager,
-            engine,
-            router,
-            deployer
+        uint256 seedAmount = 1000e18; // 1,000 tiltUSDC seed per vault
+
+        // Approve factory to pull tiltUSDC for seeding
+        _tiltUsdc.approve(factory, seedAmount * 3);
+
+        // tiltPELOSI vault
+        pelosiVault = _factory.createPoliticianVault(
+            pelosiId, "Tilt Pelosi Index", "tiltPELOSI", address(0), "ipfs://pelosi-vault", seedAmount
         );
-        pelosiVault = address(_pelosiVault);
-        _feeManager.configureVaultFees(pelosiVault, 0, address(0));
-        _registry.registerVault(pelosiVault, VaultRegistry.VaultType.POLITICIAN, address(0), "ipfs://pelosi-vault");
-        _engine.setVaultAuthorized(pelosiVault, true);
-        _pelosiVault.setKeeper(deployer, true); // deployer can trigger rebalances
-        console.log("bowPELOSI Vault:", pelosiVault);
+        PoliticianVault(pelosiVault).setKeeper(deployer, true);
+        console.log("tiltPELOSI Vault:", pelosiVault);
 
-        // bowTUBE vault
-        PoliticianVault _tubeVault = new PoliticianVault(
-            "Bowstring Tuberville Index",
-            "bowTUBE",
+        // tiltTUBE vault
+        tubervilleVault = _factory.createPoliticianVault(
             tubervilleId,
-            bowUsdc,
-            oracle,
-            feeManager,
-            engine,
-            router,
-            deployer
+            "Tilt Tuberville Index",
+            "tiltTUBE",
+            address(0),
+            "ipfs://tuberville-vault",
+            seedAmount
         );
-        tubervilleVault = address(_tubeVault);
-        _feeManager.configureVaultFees(tubervilleVault, 0, address(0));
-        _registry.registerVault(tubervilleVault, VaultRegistry.VaultType.POLITICIAN, address(0), "ipfs://tuberville-vault");
-        _engine.setVaultAuthorized(tubervilleVault, true);
-        _tubeVault.setKeeper(deployer, true);
-        console.log("bowTUBE Vault:", tubervilleVault);
+        PoliticianVault(tubervilleVault).setKeeper(deployer, true);
+        console.log("tiltTUBE Vault:", tubervilleVault);
 
-        // bowCREN vault
-        PoliticianVault _crenVault = new PoliticianVault(
-            "Bowstring Crenshaw Index",
-            "bowCREN",
-            crenshawId,
-            bowUsdc,
-            oracle,
-            feeManager,
-            engine,
-            router,
-            deployer
+        // tiltCREN vault
+        crenshawVault = _factory.createPoliticianVault(
+            crenshawId, "Tilt Crenshaw Index", "tiltCREN", address(0), "ipfs://crenshaw-vault", seedAmount
         );
-        crenshawVault = address(_crenVault);
-        _feeManager.configureVaultFees(crenshawVault, 0, address(0));
-        _registry.registerVault(crenshawVault, VaultRegistry.VaultType.POLITICIAN, address(0), "ipfs://crenshaw-vault");
-        _engine.setVaultAuthorized(crenshawVault, true);
-        _crenVault.setKeeper(deployer, true);
-        console.log("bowCREN Vault:", crenshawVault);
-
-        // ========== 10. Transfer FeeManager ownership to factory ==========
-        _feeManager.transferOwnership(factory);
+        PoliticianVault(crenshawVault).setKeeper(deployer, true);
+        console.log("tiltCREN Vault:", crenshawVault);
 
         vm.stopBroadcast();
 
@@ -217,7 +192,7 @@ contract DeployBowstring is Script {
         console.log("Network: Robinhood Chain Testnet (Chain ID:", block.chainid, ")");
         console.log("");
         console.log("--- Core Contracts ---");
-        console.log("BowUSDC:              ", bowUsdc);
+        console.log("TiltUSDC:             ", tiltUsdc);
         console.log("FeeManager:           ", feeManager);
         console.log("VaultRegistry:        ", registry);
         console.log("PortfolioOracle:      ", oracle);
@@ -228,76 +203,70 @@ contract DeployBowstring is Script {
         console.log("StockTokenFactory:    ", tokenFactory);
         console.log("");
         console.log("--- Politician Vaults ---");
-        console.log("bowPELOSI:            ", pelosiVault);
-        console.log("bowTUBE:              ", tubervilleVault);
-        console.log("bowCREN:              ", crenshawVault);
+        console.log("tiltPELOSI:           ", pelosiVault);
+        console.log("tiltTUBE:             ", tubervilleVault);
+        console.log("tiltCREN:             ", crenshawVault);
         console.log("============================================\n");
     }
 
     // ========== Hardcoded Portfolios (publicly known holdings) ==========
 
-    /// @dev Nancy Pelosi: Known for NVDA, AAPL, GOOGL, MSFT, AMZN, TSLA
     function _seedPelosiPortfolio(
         PortfolioOracle _oracle,
         bytes32 politicianId,
         MockStockTokenFactory.StockTokenInfo[] memory tokens
     ) internal {
-        // Pelosi portfolio: heavy tech, led by NVDA
         IBaseVault.TokenWeight[] memory weights = new IBaseVault.TokenWeight[](6);
-        weights[0] = IBaseVault.TokenWeight({token: _findToken(tokens, "bowNVDA"), weightBps: 2800}); // 28%
-        weights[1] = IBaseVault.TokenWeight({token: _findToken(tokens, "bowAAPL"), weightBps: 2200}); // 22%
-        weights[2] = IBaseVault.TokenWeight({token: _findToken(tokens, "bowGOOGL"), weightBps: 1800}); // 18%
-        weights[3] = IBaseVault.TokenWeight({token: _findToken(tokens, "bowMSFT"), weightBps: 1500}); // 15%
-        weights[4] = IBaseVault.TokenWeight({token: _findToken(tokens, "bowAMZN"), weightBps: 1000}); // 10%
-        weights[5] = IBaseVault.TokenWeight({token: _findToken(tokens, "bowTSLA"), weightBps: 700});  // 7%
+        weights[0] = IBaseVault.TokenWeight({token: _findToken(tokens, "tiltNVDA"), weightBps: 2800}); // 28%
+        weights[1] = IBaseVault.TokenWeight({token: _findToken(tokens, "tiltAAPL"), weightBps: 2200}); // 22%
+        weights[2] = IBaseVault.TokenWeight({token: _findToken(tokens, "tiltGOOGL"), weightBps: 1800}); // 18%
+        weights[3] = IBaseVault.TokenWeight({token: _findToken(tokens, "tiltMSFT"), weightBps: 1500}); // 15%
+        weights[4] = IBaseVault.TokenWeight({token: _findToken(tokens, "tiltAMZN"), weightBps: 1000}); // 10%
+        weights[5] = IBaseVault.TokenWeight({token: _findToken(tokens, "tiltTSLA"), weightBps: 700}); // 7%
 
         _oracle.updatePortfolio(politicianId, weights);
         console.log("Seeded Pelosi portfolio: NVDA 28%, AAPL 22%, GOOGL 18%, MSFT 15%, AMZN 10%, TSLA 7%");
     }
 
-    /// @dev Tommy Tuberville: Known for financials + defense, broader mix
     function _seedTubervillePortfolio(
         PortfolioOracle _oracle,
         bytes32 politicianId,
         MockStockTokenFactory.StockTokenInfo[] memory tokens
     ) internal {
-        // Tuberville portfolio: diversified with financials and big tech
         IBaseVault.TokenWeight[] memory weights = new IBaseVault.TokenWeight[](6);
-        weights[0] = IBaseVault.TokenWeight({token: _findToken(tokens, "bowJPM"), weightBps: 2500});  // 25%
-        weights[1] = IBaseVault.TokenWeight({token: _findToken(tokens, "bowNVDA"), weightBps: 2000}); // 20%
-        weights[2] = IBaseVault.TokenWeight({token: _findToken(tokens, "bowMSFT"), weightBps: 1800}); // 18%
-        weights[3] = IBaseVault.TokenWeight({token: _findToken(tokens, "bowV"), weightBps: 1500});    // 15%
-        weights[4] = IBaseVault.TokenWeight({token: _findToken(tokens, "bowAAPL"), weightBps: 1200}); // 12%
-        weights[5] = IBaseVault.TokenWeight({token: _findToken(tokens, "bowMETA"), weightBps: 1000}); // 10%
+        weights[0] = IBaseVault.TokenWeight({token: _findToken(tokens, "tiltJPM"), weightBps: 2500}); // 25%
+        weights[1] = IBaseVault.TokenWeight({token: _findToken(tokens, "tiltNVDA"), weightBps: 2000}); // 20%
+        weights[2] = IBaseVault.TokenWeight({token: _findToken(tokens, "tiltMSFT"), weightBps: 1800}); // 18%
+        weights[3] = IBaseVault.TokenWeight({token: _findToken(tokens, "tiltV"), weightBps: 1500}); // 15%
+        weights[4] = IBaseVault.TokenWeight({token: _findToken(tokens, "tiltAAPL"), weightBps: 1200}); // 12%
+        weights[5] = IBaseVault.TokenWeight({token: _findToken(tokens, "tiltMETA"), weightBps: 1000}); // 10%
 
         _oracle.updatePortfolio(politicianId, weights);
         console.log("Seeded Tuberville portfolio: JPM 25%, NVDA 20%, MSFT 18%, V 15%, AAPL 12%, META 10%");
     }
 
-    /// @dev Dan Crenshaw: Known for energy + healthcare positions
     function _seedCrenshawPortfolio(
         PortfolioOracle _oracle,
         bytes32 politicianId,
         MockStockTokenFactory.StockTokenInfo[] memory tokens
     ) internal {
-        // Crenshaw portfolio: tech-heavy with healthcare (JNJ)
         IBaseVault.TokenWeight[] memory weights = new IBaseVault.TokenWeight[](6);
-        weights[0] = IBaseVault.TokenWeight({token: _findToken(tokens, "bowMSFT"), weightBps: 2500}); // 25%
-        weights[1] = IBaseVault.TokenWeight({token: _findToken(tokens, "bowAAPL"), weightBps: 2000}); // 20%
-        weights[2] = IBaseVault.TokenWeight({token: _findToken(tokens, "bowJNJ"), weightBps: 1800});  // 18%
-        weights[3] = IBaseVault.TokenWeight({token: _findToken(tokens, "bowGOOGL"), weightBps: 1500}); // 15%
-        weights[4] = IBaseVault.TokenWeight({token: _findToken(tokens, "bowAMZN"), weightBps: 1200}); // 12%
-        weights[5] = IBaseVault.TokenWeight({token: _findToken(tokens, "bowTSLA"), weightBps: 1000}); // 10%
+        weights[0] = IBaseVault.TokenWeight({token: _findToken(tokens, "tiltMSFT"), weightBps: 2500}); // 25%
+        weights[1] = IBaseVault.TokenWeight({token: _findToken(tokens, "tiltAAPL"), weightBps: 2000}); // 20%
+        weights[2] = IBaseVault.TokenWeight({token: _findToken(tokens, "tiltJNJ"), weightBps: 1800}); // 18%
+        weights[3] = IBaseVault.TokenWeight({token: _findToken(tokens, "tiltGOOGL"), weightBps: 1500}); // 15%
+        weights[4] = IBaseVault.TokenWeight({token: _findToken(tokens, "tiltAMZN"), weightBps: 1200}); // 12%
+        weights[5] = IBaseVault.TokenWeight({token: _findToken(tokens, "tiltTSLA"), weightBps: 1000}); // 10%
 
         _oracle.updatePortfolio(politicianId, weights);
         console.log("Seeded Crenshaw portfolio: MSFT 25%, AAPL 20%, JNJ 18%, GOOGL 15%, AMZN 12%, TSLA 10%");
     }
 
-    /// @dev Find a token address by symbol from the factory's deployed tokens
-    function _findToken(
-        MockStockTokenFactory.StockTokenInfo[] memory tokens,
-        string memory symbol
-    ) internal pure returns (address) {
+    function _findToken(MockStockTokenFactory.StockTokenInfo[] memory tokens, string memory symbol)
+        internal
+        pure
+        returns (address)
+    {
         for (uint256 i = 0; i < tokens.length; i++) {
             if (keccak256(bytes(tokens[i].symbol)) == keccak256(bytes(symbol))) {
                 return tokens[i].token;

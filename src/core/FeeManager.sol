@@ -2,10 +2,17 @@
 pragma solidity ^0.8.24;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /// @title FeeManager
-/// @notice Centralized fee configuration and collection with protocol/curator splits
+/// @notice Centralized fee configuration and collection with protocol/curator splits.
+///         Entry/exit fees are collected in the base asset (ERC-20).
+///         Management/performance fees are collected via share dilution in BaseVault
+///         and minted directly to protocol treasury and curator addresses.
 contract FeeManager is Ownable {
+    using SafeERC20 for IERC20;
+
     // --- Constants ---
     uint16 public constant MAX_ENTRY_FEE_BPS = 100; // 1%
     uint16 public constant MAX_EXIT_FEE_BPS = 200; // 2%
@@ -23,6 +30,9 @@ contract FeeManager is Ownable {
     // --- Protocol fee recipient ---
     address public protocolTreasury;
 
+    // --- Base asset for fee collection (ERC-20) ---
+    IERC20 public baseAsset;
+
     // --- Per-vault fee overrides ---
     struct VaultFeeConfig {
         uint16 entryFeeBps;
@@ -36,7 +46,7 @@ contract FeeManager is Ownable {
 
     mapping(address => VaultFeeConfig) public vaultFees;
 
-    // --- Accumulated fees ---
+    // --- Accumulated fees (base asset amounts from entry/exit fees) ---
     mapping(address => uint256) public accumulatedProtocolFees;
     mapping(address => uint256) public accumulatedCuratorFees; // curator address => fees
 
@@ -50,11 +60,14 @@ contract FeeManager is Ownable {
     event ProtocolFeesCollected(address indexed recipient, uint256 amount);
     event CuratorFeesCollected(address indexed curator, uint256 amount);
     event TreasuryUpdated(address indexed newTreasury);
+    event BaseAssetUpdated(address indexed newBaseAsset);
     event CallerAuthorized(address indexed caller, bool authorized);
 
-    constructor(address _treasury) Ownable(msg.sender) {
+    constructor(address _treasury, address _baseAsset) Ownable(msg.sender) {
         require(_treasury != address(0), "FeeManager: zero treasury");
+        require(_baseAsset != address(0), "FeeManager: zero base asset");
         protocolTreasury = _treasury;
+        baseAsset = IERC20(_baseAsset);
     }
 
     // --- Admin functions ---
@@ -69,12 +82,7 @@ contract FeeManager is Ownable {
         emit CallerAuthorized(caller, authorized);
     }
 
-    function setDefaultFees(
-        uint16 _entryBps,
-        uint16 _exitBps,
-        uint16 _mgmtBps,
-        uint16 _perfBps
-    ) external onlyOwner {
+    function setDefaultFees(uint16 _entryBps, uint16 _exitBps, uint16 _mgmtBps, uint16 _perfBps) external onlyOwner {
         require(_entryBps <= MAX_ENTRY_FEE_BPS, "FeeManager: entry fee too high");
         require(_exitBps <= MAX_EXIT_FEE_BPS, "FeeManager: exit fee too high");
         require(_mgmtBps <= MAX_MANAGEMENT_FEE_BPS, "FeeManager: mgmt fee too high");
@@ -94,13 +102,17 @@ contract FeeManager is Ownable {
         emit TreasuryUpdated(_treasury);
     }
 
+    function setBaseAsset(address _baseAsset) external onlyOwner {
+        require(_baseAsset != address(0), "FeeManager: zero base asset");
+        baseAsset = IERC20(_baseAsset);
+        emit BaseAssetUpdated(_baseAsset);
+    }
+
     /// @notice Configure fees for a specific vault (called by VaultFactory on creation)
-    function configureVaultFees(
-        address vault,
-        uint16 curatorShareBps,
-        address curator
-    ) external onlyAuthorized {
-        require(curatorShareBps <= BPS_DENOMINATOR - MIN_PROTOCOL_SHARE_BPS, "FeeManager: curator share too high");
+    function configureVaultFees(address vault, uint16 curatorShareBps, address curator) external onlyAuthorized {
+        require(
+            curatorShareBps <= BPS_DENOMINATOR - MIN_PROTOCOL_SHARE_BPS, "FeeManager: curator share too high"
+        );
 
         vaultFees[vault] = VaultFeeConfig({
             entryFeeBps: defaultEntryFeeBps,
@@ -137,7 +149,8 @@ contract FeeManager is Ownable {
         return defaultPerformanceFeeBps;
     }
 
-    /// @notice Record fees from a vault, splitting between protocol and curator
+    /// @notice Record entry/exit fees from a vault, splitting between protocol and curator.
+    ///         The vault must have already transferred the base asset to this contract.
     function recordFees(uint256 totalFeeAmount) external {
         address vault = msg.sender;
         VaultFeeConfig memory config = vaultFees[vault];
@@ -156,28 +169,32 @@ contract FeeManager is Ownable {
         emit FeesAccumulated(vault, protocolAmount, curatorAmount);
     }
 
-    /// @notice Collect accumulated protocol fees
+    /// @notice Collect accumulated protocol fees via ERC-20 transfer
     function collectProtocolFees() external {
         uint256 amount = accumulatedProtocolFees[protocolTreasury];
         require(amount > 0, "FeeManager: no fees to collect");
         accumulatedProtocolFees[protocolTreasury] = 0;
 
-        (bool success,) = protocolTreasury.call{value: amount}("");
-        require(success, "FeeManager: transfer failed");
+        baseAsset.safeTransfer(protocolTreasury, amount);
 
         emit ProtocolFeesCollected(protocolTreasury, amount);
     }
 
-    /// @notice Curator collects their accumulated fees
+    /// @notice Curator collects their accumulated fees via ERC-20 transfer
     function collectCuratorFees() external {
         uint256 amount = accumulatedCuratorFees[msg.sender];
         require(amount > 0, "FeeManager: no fees to collect");
         accumulatedCuratorFees[msg.sender] = 0;
 
-        (bool success,) = msg.sender.call{value: amount}("");
-        require(success, "FeeManager: transfer failed");
+        baseAsset.safeTransfer(msg.sender, amount);
 
         emit CuratorFeesCollected(msg.sender, amount);
+    }
+
+    /// @notice Emergency rescue for any ERC-20 accidentally sent to this contract
+    function rescueToken(address token, address to, uint256 amount) external onlyOwner {
+        require(to != address(0), "FeeManager: zero address");
+        IERC20(token).safeTransfer(to, amount);
     }
 
     /// @notice Get full fee config for a vault

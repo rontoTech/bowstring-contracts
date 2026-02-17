@@ -13,6 +13,7 @@ import {ITokenRouter} from "../interfaces/ITokenRouter.sol";
 /// @notice ERC-4626 vault that mirrors a politician's portfolio.
 ///         Target weights are sourced from PortfolioOracle (Chainlink-fed).
 ///         Only admin or Chainlink Automation can trigger rebalances.
+///         Includes emergency pause capability.
 contract PoliticianVault is BaseVault, Ownable {
     // --- State ---
     bytes32 public immutable politicianId;
@@ -76,6 +77,22 @@ contract PoliticianVault is BaseVault, Ownable {
         address old = address(baseAsset);
         baseAsset = IERC20(_baseAsset);
         emit BaseAssetUpdated(old, _baseAsset);
+    }
+
+    function setWithdrawalSlippage(uint256 _slippageBps) external override onlyOwner {
+        require(_slippageBps <= 1000, "PoliticianVault: slippage too high");
+        withdrawalSlippageBps = _slippageBps;
+        emit WithdrawalSlippageUpdated(_slippageBps);
+    }
+
+    // ===================== Emergency =====================
+
+    function pause() external override onlyOwner {
+        _pause();
+    }
+
+    function unpause() external override onlyOwner {
+        _unpause();
     }
 
     // ===================== Rebalance =====================

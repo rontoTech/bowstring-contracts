@@ -8,39 +8,42 @@ import {PoliticianVault} from "../src/core/PoliticianVault.sol";
 
 /// @title UpgradeRebalanceEngine
 /// @notice Deploys a fixed RebalanceEngine, authorizes vaults, and updates vault references.
+///         This script is for upgrading existing deployments.
 contract UpgradeRebalanceEngine is Script {
-    // Existing deployed addresses
-    address constant ROUTER = 0x960773685f319b4E7BCaEf3306F5aE954efc57b7;
-    address constant BOW_USDC = 0xF41c1d33C0c89456c68E5Af491A0eC65f1BEf6bA;
+    // Existing deployed addresses (update these for your deployment)
+    address constant ROUTER = address(0); // UPDATE
+    address constant TILT_USDC = address(0); // UPDATE
+    address constant VAULT_FACTORY = address(0); // UPDATE
 
-    address constant PELOSI_VAULT = 0x44e9c800ea726e157C4Fde241f0acA1a04c66f02;
-    address constant TUBE_VAULT = 0xdC1Cd37a69246Bdf7454fFdA911331b184E62fFc;
-    address constant CREN_VAULT = 0xBB98d64CA8DC72B618E0A2F5852bDf020d922477;
+    // Vault addresses (update these for your deployment)
+    address constant PELOSI_VAULT = address(0); // UPDATE
+    address constant TUBE_VAULT = address(0); // UPDATE
+    address constant CREN_VAULT = address(0); // UPDATE
 
     function run() external {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         vm.startBroadcast(deployerPrivateKey);
 
-        // 1. Deploy new RebalanceEngine with fixed buy-side minAmountOut
-        RebalanceEngine newEngine = new RebalanceEngine(ROUTER, BOW_USDC);
+        // 1. Deploy new RebalanceEngine
+        RebalanceEngine newEngine = new RebalanceEngine(ROUTER, TILT_USDC);
         address engineAddr = address(newEngine);
         console.log("New RebalanceEngine:", engineAddr);
 
         // 2. Authorize the new engine as caller on the router
         MockTokenRouter(ROUTER).setAuthorizedCaller(engineAddr, true);
-        console.log("Router: authorized new engine");
 
-        // 3. Authorize each vault on the new engine
+        // 3. Authorize factory to register future vaults
+        newEngine.setAuthorizedCaller(VAULT_FACTORY, true);
+
+        // 4. Authorize each existing vault on the new engine
         newEngine.setVaultAuthorized(PELOSI_VAULT, true);
         newEngine.setVaultAuthorized(TUBE_VAULT, true);
         newEngine.setVaultAuthorized(CREN_VAULT, true);
-        console.log("Engine: authorized all 3 vaults");
 
-        // 4. Update each vault to point to the new engine
+        // 5. Update each vault to point to the new engine
         PoliticianVault(PELOSI_VAULT).setRebalanceEngine(engineAddr);
         PoliticianVault(TUBE_VAULT).setRebalanceEngine(engineAddr);
         PoliticianVault(CREN_VAULT).setRebalanceEngine(engineAddr);
-        console.log("Vaults: updated rebalance engine references");
 
         vm.stopBroadcast();
 

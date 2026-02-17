@@ -23,11 +23,13 @@ contract RebalanceEngine is IRebalanceEngine, Ownable {
 
     // --- Access control ---
     mapping(address => bool) public authorizedVaults;
+    mapping(address => bool) public authorizedCallers; // VaultFactory, admin scripts
 
     // --- Events ---
     event RouterUpdated(address indexed newRouter);
     event SlippageUpdated(uint256 newSlippageBps);
     event VaultAuthorized(address indexed vault, bool authorized);
+    event CallerAuthorized(address indexed caller, bool authorized);
 
     // --- Errors ---
     error UnauthorizedVault();
@@ -52,7 +54,15 @@ contract RebalanceEngine is IRebalanceEngine, Ownable {
         emit SlippageUpdated(_slippageBps);
     }
 
-    function setVaultAuthorized(address vault, bool authorized) external onlyOwner {
+    /// @notice Authorize a caller (e.g., VaultFactory) to register vaults
+    function setAuthorizedCaller(address caller, bool authorized) external onlyOwner {
+        authorizedCallers[caller] = authorized;
+        emit CallerAuthorized(caller, authorized);
+    }
+
+    /// @notice Authorize a vault to use this engine. Callable by owner or authorized callers.
+    function setVaultAuthorized(address vault, bool authorized) external {
+        require(msg.sender == owner() || authorizedCallers[msg.sender], "RebalanceEngine: not authorized");
         authorizedVaults[vault] = authorized;
         emit VaultAuthorized(vault, authorized);
     }
@@ -68,26 +78,20 @@ contract RebalanceEngine is IRebalanceEngine, Ownable {
     ) external view override returns (TradeOrder[] memory trades) {
         if (address(tokenRouter) == address(0)) revert RouterNotSet();
 
-        // Build a list of sells (overweight tokens) and buys (underweight tokens)
-        // Strategy: sell overweight to base asset, buy underweight from base asset
-
         uint256 maxTrades = currentWeights.length + targetWeights.length;
         TradeOrder[] memory tempTrades = new TradeOrder[](maxTrades);
         uint256 tradeCount = 0;
 
-        // Find tokens to sell (in current but not in target, or overweight)
+        // Find tokens to sell (overweight)
         for (uint256 i = 0; i < currentWeights.length; i++) {
             uint16 targetBps = _findWeight(currentWeights[i].token, targetWeights);
             if (currentWeights[i].weightBps > targetBps) {
                 uint256 excessBps = currentWeights[i].weightBps - targetBps;
-                uint256 sellValueBase = (totalValue * excessBps) / 10000; // value in base asset terms
+                uint256 sellValueBase = (totalValue * excessBps) / 10000;
 
                 if (sellValueBase > 0) {
-                    // Convert base-asset value to token units using router quote
-                    // getQuote(baseAsset, token, amount) = how many tokens is this base amount worth
-                    uint256 sellAmountTokens = tokenRouter.getQuote(
-                        baseAsset, currentWeights[i].token, sellValueBase
-                    );
+                    uint256 sellAmountTokens =
+                        tokenRouter.getQuote(baseAsset, currentWeights[i].token, sellValueBase);
                     uint256 minOut = (sellValueBase * (10000 - maxSlippageBps)) / 10000;
                     tempTrades[tradeCount] = TradeOrder({
                         tokenIn: currentWeights[i].token,
@@ -100,14 +104,13 @@ contract RebalanceEngine is IRebalanceEngine, Ownable {
             }
         }
 
-        // Find tokens to buy (in target but not in current, or underweight)
+        // Find tokens to buy (underweight)
         for (uint256 i = 0; i < targetWeights.length; i++) {
             uint16 currentBps = _findWeight(targetWeights[i].token, currentWeights);
             if (targetWeights[i].weightBps > currentBps) {
                 uint256 deficitBps = targetWeights[i].weightBps - currentBps;
                 uint256 buyValue = (totalValue * deficitBps) / 10000;
                 if (buyValue > 0) {
-                    // Get expected output in target token units, then apply slippage
                     uint256 expectedOut = tokenRouter.getQuote(baseAsset, targetWeights[i].token, buyValue);
                     uint256 minOut = (expectedOut * (10000 - maxSlippageBps)) / 10000;
                     tempTrades[tradeCount] = TradeOrder({

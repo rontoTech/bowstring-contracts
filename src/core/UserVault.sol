@@ -10,21 +10,34 @@ import {ITokenRouter} from "../interfaces/ITokenRouter.sol";
 /// @title UserVault
 /// @notice Permissionless vault where a curator sets target portfolio weights.
 ///         Anyone can create one via VaultFactory. Curator earns fee split.
+///         Critical config changes (engine, router, base asset) are time-locked
+///         to protect depositors from curator rug pulls.
 contract UserVault is BaseVault {
     // --- State ---
     address public curator;
     IBaseVault.TokenWeight[] private _targetWeights;
 
-    // --- Configuration ---
+    // --- Weight Management ---
     uint256 public weightChangeTimeLock; // seconds delay for weight changes
     uint256 public pendingWeightChangeTime; // when pending weights take effect
     IBaseVault.TokenWeight[] private _pendingWeights;
     bool public hasPendingWeights;
 
+    // --- Config Change Time-lock ---
+    struct PendingAddress {
+        address value;
+        uint256 effectiveTime;
+        bool pending;
+    }
+
+    PendingAddress public pendingRebalanceEngine;
+    PendingAddress public pendingTokenRouter;
+    PendingAddress public pendingBaseAsset;
+
     uint256 public minRebalanceInterval; // minimum seconds between rebalances
     uint256 public lastRebalanceTimestamp;
 
-    // --- Token whitelist (enforced by factory, stored here for reference) ---
+    // --- Token whitelist ---
     mapping(address => bool) public approvedTokens;
     address[] public approvedTokenList;
 
@@ -34,6 +47,9 @@ contract UserVault is BaseVault {
     event WeightChangePending(IBaseVault.TokenWeight[] weights, uint256 effectiveTime);
     event TimeLockUpdated(uint256 newTimeLock);
     event TokenApproved(address indexed token, bool approved);
+    event ConfigChangeProposed(bytes32 indexed configKey, address newValue, uint256 effectiveTime);
+    event ConfigChangeApplied(bytes32 indexed configKey, address newValue);
+    event ConfigChangeCancelled(bytes32 indexed configKey);
 
     // --- Errors ---
     error OnlyCurator();
@@ -42,6 +58,8 @@ contract UserVault is BaseVault {
     error RebalanceTooSoon();
     error PendingWeightsNotReady();
     error WeightsNotChanged();
+    error NoPendingChange();
+    error TimeLockNotExpired();
 
     modifier onlyCurator() {
         if (msg.sender != curator) revert OnlyCurator();
@@ -60,9 +78,7 @@ contract UserVault is BaseVault {
         uint256 _timeLock,
         uint256 _minRebalanceInterval,
         IBaseVault.TokenWeight[] memory _initialWeights
-    )
-        BaseVault(_name, _symbol, _baseAsset, _feeManager, _rebalanceEngine, _tokenRouter)
-    {
+    ) BaseVault(_name, _symbol, _baseAsset, _feeManager, _rebalanceEngine, _tokenRouter) {
         require(_curator != address(0), "UserVault: zero curator");
         curator = _curator;
         weightChangeTimeLock = _timeLock;
@@ -103,10 +119,8 @@ contract UserVault is BaseVault {
         _validateWeights(weights);
 
         if (weightChangeTimeLock == 0) {
-            // Immediate effect
             _setWeights(weights);
         } else {
-            // Queue pending weights
             delete _pendingWeights;
             for (uint256 i = 0; i < weights.length; i++) {
                 _pendingWeights.push(weights[i]);
@@ -132,6 +146,91 @@ contract UserVault is BaseVault {
         emit TargetWeightsUpdated(_targetWeights);
     }
 
+    // ===================== Time-locked Config Changes =====================
+
+    /// @notice Propose a new rebalance engine (time-locked)
+    function setRebalanceEngine(address _engine) external override onlyCurator {
+        require(_engine != address(0), "UserVault: zero engine");
+        if (weightChangeTimeLock == 0) {
+            rebalanceEngine = IRebalanceEngine(_engine);
+            emit ConfigChangeApplied("rebalanceEngine", _engine);
+        } else {
+            pendingRebalanceEngine = PendingAddress({
+                value: _engine,
+                effectiveTime: block.timestamp + weightChangeTimeLock,
+                pending: true
+            });
+            emit ConfigChangeProposed("rebalanceEngine", _engine, pendingRebalanceEngine.effectiveTime);
+        }
+    }
+
+    /// @notice Apply pending rebalance engine after time-lock
+    function applyRebalanceEngine() external {
+        if (!pendingRebalanceEngine.pending) revert NoPendingChange();
+        if (block.timestamp < pendingRebalanceEngine.effectiveTime) revert TimeLockNotExpired();
+        rebalanceEngine = IRebalanceEngine(pendingRebalanceEngine.value);
+        pendingRebalanceEngine.pending = false;
+        emit ConfigChangeApplied("rebalanceEngine", pendingRebalanceEngine.value);
+    }
+
+    /// @notice Propose a new token router (time-locked)
+    function setTokenRouter(address _router) external override onlyCurator {
+        require(_router != address(0), "UserVault: zero router");
+        if (weightChangeTimeLock == 0) {
+            tokenRouter = ITokenRouter(_router);
+            emit ConfigChangeApplied("tokenRouter", _router);
+        } else {
+            pendingTokenRouter = PendingAddress({
+                value: _router,
+                effectiveTime: block.timestamp + weightChangeTimeLock,
+                pending: true
+            });
+            emit ConfigChangeProposed("tokenRouter", _router, pendingTokenRouter.effectiveTime);
+        }
+    }
+
+    /// @notice Apply pending token router after time-lock
+    function applyTokenRouter() external {
+        if (!pendingTokenRouter.pending) revert NoPendingChange();
+        if (block.timestamp < pendingTokenRouter.effectiveTime) revert TimeLockNotExpired();
+        tokenRouter = ITokenRouter(pendingTokenRouter.value);
+        pendingTokenRouter.pending = false;
+        emit ConfigChangeApplied("tokenRouter", pendingTokenRouter.value);
+    }
+
+    /// @notice Propose a new base asset (time-locked)
+    function setBaseAsset(address _baseAsset) external override onlyCurator {
+        require(_baseAsset != address(0), "UserVault: zero base asset");
+        if (weightChangeTimeLock == 0) {
+            address old = address(baseAsset);
+            baseAsset = IERC20(_baseAsset);
+            emit BaseAssetUpdated(old, _baseAsset);
+        } else {
+            pendingBaseAsset = PendingAddress({
+                value: _baseAsset,
+                effectiveTime: block.timestamp + weightChangeTimeLock,
+                pending: true
+            });
+            emit ConfigChangeProposed("baseAsset", _baseAsset, pendingBaseAsset.effectiveTime);
+        }
+    }
+
+    /// @notice Apply pending base asset after time-lock
+    function applyBaseAsset() external {
+        if (!pendingBaseAsset.pending) revert NoPendingChange();
+        if (block.timestamp < pendingBaseAsset.effectiveTime) revert TimeLockNotExpired();
+        address old = address(baseAsset);
+        baseAsset = IERC20(pendingBaseAsset.value);
+        pendingBaseAsset.pending = false;
+        emit BaseAssetUpdated(old, pendingBaseAsset.value);
+    }
+
+    function setWithdrawalSlippage(uint256 _slippageBps) external override onlyCurator {
+        require(_slippageBps <= 1000, "UserVault: slippage too high");
+        withdrawalSlippageBps = _slippageBps;
+        emit WithdrawalSlippageUpdated(_slippageBps);
+    }
+
     // ===================== Rebalance =====================
 
     /// @notice Trigger rebalance - only curator
@@ -145,23 +244,14 @@ contract UserVault is BaseVault {
         lastRebalanceTimestamp = block.timestamp;
     }
 
-    // ===================== Admin (Curator) =====================
+    // ===================== Emergency =====================
 
-    function setRebalanceEngine(address _engine) external override onlyCurator {
-        require(_engine != address(0), "UserVault: zero engine");
-        rebalanceEngine = IRebalanceEngine(_engine);
+    function pause() external override onlyCurator {
+        _pause();
     }
 
-    function setTokenRouter(address _router) external override onlyCurator {
-        require(_router != address(0), "UserVault: zero router");
-        tokenRouter = ITokenRouter(_router);
-    }
-
-    function setBaseAsset(address _baseAsset) external override onlyCurator {
-        require(_baseAsset != address(0), "UserVault: zero base asset");
-        address old = address(baseAsset);
-        baseAsset = IERC20(_baseAsset);
-        emit BaseAssetUpdated(old, _baseAsset);
+    function unpause() external override onlyCurator {
+        _unpause();
     }
 
     // ===================== Internal =====================

@@ -30,21 +30,21 @@ contract MockStockToken is ERC20, Ownable {
     }
 }
 
-/// @title BowUSDC
-/// @notice Bowstring testnet USDC (18 decimals) with EIP-2612 permit support.
+/// @title TiltUSDC
+/// @notice Tilt Protocol testnet USDC (18 decimals) with EIP-2612 permit support.
 ///         Mimics real USDC functionality for gasless approvals.
 ///         Includes a public faucet for testers.
 import {ERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
 
-contract BowUSDC is ERC20, ERC20Permit, Ownable {
-    uint256 public constant FAUCET_AMOUNT = 10_000e18; // 10,000 bowUSDC per claim
+contract TiltUSDC is ERC20, ERC20Permit, Ownable {
+    uint256 public constant FAUCET_AMOUNT = 10_000e18; // 10,000 tiltUSDC per claim
     uint256 public constant FAUCET_COOLDOWN = 24 hours;
 
     mapping(address => uint256) public lastFaucetClaim;
 
     event FaucetClaimed(address indexed user, uint256 amount);
 
-    constructor() ERC20("Bowstring USDC", "bowUSDC") ERC20Permit("Bowstring USDC") Ownable(msg.sender) {}
+    constructor() ERC20("Tilt USDC", "tiltUSDC") ERC20Permit("Tilt USDC") Ownable(msg.sender) {}
 
     function decimals() public pure override returns (uint8) {
         return 18;
@@ -55,12 +55,12 @@ contract BowUSDC is ERC20, ERC20Permit, Ownable {
         return super.nonces(owner);
     }
 
-    /// @notice Public faucet - anyone can claim 10,000 bowUSDC every 24 hours
+    /// @notice Public faucet - anyone can claim 10,000 tiltUSDC every 24 hours
     function faucet() external {
         require(
-            lastFaucetClaim[msg.sender] == 0 ||
-            block.timestamp >= lastFaucetClaim[msg.sender] + FAUCET_COOLDOWN,
-            "BowUSDC: faucet cooldown active"
+            lastFaucetClaim[msg.sender] == 0
+                || block.timestamp >= lastFaucetClaim[msg.sender] + FAUCET_COOLDOWN,
+            "TiltUSDC: faucet cooldown active"
         );
         lastFaucetClaim[msg.sender] = block.timestamp;
         _mint(msg.sender, FAUCET_AMOUNT);
@@ -78,7 +78,7 @@ contract BowUSDC is ERC20, ERC20Permit, Ownable {
 }
 
 /// @title MockStockTokenFactory
-/// @notice Factory for creating bow-branded stock tokens on testnet
+/// @notice Factory for creating tilt-branded stock tokens on testnet
 contract MockStockTokenFactory is Ownable {
     struct StockTokenInfo {
         address token;
@@ -103,29 +103,24 @@ contract MockStockTokenFactory is Ownable {
         MockStockToken newToken = new MockStockToken(name_, symbol_, 18);
         token = address(newToken);
 
-        deployedTokens.push(StockTokenInfo({
-            token: token,
-            name: name_,
-            symbol: symbol_,
-            initialPrice: initialPrice
-        }));
+        deployedTokens.push(StockTokenInfo({token: token, name: name_, symbol: symbol_, initialPrice: initialPrice}));
         tokenBySymbol[symbol_] = token;
 
         emit StockTokenCreated(token, name_, symbol_);
     }
 
-    /// @notice Deploy the standard set of Bowstring stock tokens for testing
+    /// @notice Deploy the standard set of Tilt Protocol stock tokens for testing
     function deployStandardTokens() external onlyOwner {
-        _createToken("Bowstring Apple", "bowAAPL", 195e18);
-        _createToken("Bowstring Microsoft", "bowMSFT", 420e18);
-        _createToken("Bowstring NVIDIA", "bowNVDA", 875e18);
-        _createToken("Bowstring Tesla", "bowTSLA", 250e18);
-        _createToken("Bowstring Amazon", "bowAMZN", 185e18);
-        _createToken("Bowstring Alphabet", "bowGOOGL", 165e18);
-        _createToken("Bowstring Meta", "bowMETA", 500e18);
-        _createToken("Bowstring JPMorgan", "bowJPM", 205e18);
-        _createToken("Bowstring Visa", "bowV", 290e18);
-        _createToken("Bowstring J&J", "bowJNJ", 160e18);
+        _createToken("Tilt Apple", "tiltAAPL", 195e18);
+        _createToken("Tilt Microsoft", "tiltMSFT", 420e18);
+        _createToken("Tilt NVIDIA", "tiltNVDA", 875e18);
+        _createToken("Tilt Tesla", "tiltTSLA", 250e18);
+        _createToken("Tilt Amazon", "tiltAMZN", 185e18);
+        _createToken("Tilt Alphabet", "tiltGOOGL", 165e18);
+        _createToken("Tilt Meta", "tiltMETA", 500e18);
+        _createToken("Tilt JPMorgan", "tiltJPM", 205e18);
+        _createToken("Tilt Visa", "tiltV", 290e18);
+        _createToken("Tilt J&J", "tiltJNJ", 160e18);
     }
 
     /// @notice Mint tokens to an address (for seeding liquidity)
@@ -146,12 +141,7 @@ contract MockStockTokenFactory is Ownable {
         MockStockToken newToken = new MockStockToken(name_, symbol_, 18);
         address token = address(newToken);
 
-        deployedTokens.push(StockTokenInfo({
-            token: token,
-            name: name_,
-            symbol: symbol_,
-            initialPrice: initialPrice
-        }));
+        deployedTokens.push(StockTokenInfo({token: token, name: name_, symbol: symbol_, initialPrice: initialPrice}));
         tokenBySymbol[symbol_] = token;
 
         emit StockTokenCreated(token, name_, symbol_);
