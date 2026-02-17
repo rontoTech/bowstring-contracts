@@ -97,12 +97,28 @@ contract PoliticianVault is BaseVault, Ownable {
 
     // ===================== Rebalance =====================
 
-    /// @notice Trigger rebalance - only keepers or owner
-    function rebalance() external override {
+    /// @notice Trigger rebalance - only keepers or owner. Protected against reentrancy and paused state.
+    function rebalance() external override nonReentrant whenNotPaused {
         if (!isKeeper[msg.sender] && msg.sender != owner()) {
             revert UnauthorizedRebalance();
         }
         _accrueManagementFee();
+        _executeRebalance();
+    }
+
+    /// @notice Deposit + rebalance with same access control as rebalance().
+    ///         Prevents unauthorized callers from triggering rebalances via deposit.
+    function depositAndRebalance(uint256 assets, address receiver)
+        external
+        override
+        nonReentrant
+        whenNotPaused
+        returns (uint256 shares)
+    {
+        if (!isKeeper[msg.sender] && msg.sender != owner()) {
+            revert UnauthorizedRebalance();
+        }
+        shares = _deposit(assets, receiver);
         _executeRebalance();
     }
 

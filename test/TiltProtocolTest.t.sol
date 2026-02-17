@@ -13,6 +13,7 @@ import {RebalanceEngine} from "../src/rebalance/RebalanceEngine.sol";
 import {MockTokenRouter} from "../src/rebalance/TokenRouter.sol";
 import {MockStockToken, TiltUSDC, MockStockTokenFactory} from "../src/tokens/MockStockToken.sol";
 import {IBaseVault} from "../src/interfaces/IBaseVault.sol";
+import {IRebalanceEngine} from "../src/interfaces/IRebalanceEngine.sol";
 
 /// @title TiltProtocolTest
 /// @notice Comprehensive tests for the Tilt Protocol
@@ -295,6 +296,9 @@ contract TiltProtocolTest is Test {
         address vaultAddr = _createPoliticianVault();
         PoliticianVault vault = PoliticianVault(vaultAddr);
 
+        // depositAndRebalance now requires keeper/owner access
+        vault.setKeeper(alice, true);
+
         vm.startPrank(alice);
         usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
         uint256 shares = vault.depositAndRebalance(DEPOSIT_AMOUNT, alice);
@@ -305,6 +309,18 @@ contract TiltProtocolTest is Test {
         // Should have held tokens after rebalance
         address[] memory held = vault.getHeldTokens();
         assertTrue(held.length > 0);
+    }
+
+    function test_PoliticianVault_depositAndRebalance_unauthorized() public {
+        address vaultAddr = _createPoliticianVault();
+        PoliticianVault vault = PoliticianVault(vaultAddr);
+
+        // Random user should NOT be able to call depositAndRebalance
+        vm.startPrank(alice);
+        usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
+        vm.expectRevert(PoliticianVault.UnauthorizedRebalance.selector);
+        vault.depositAndRebalance(DEPOSIT_AMOUNT, alice);
+        vm.stopPrank();
     }
 
     // ===================== User Vault Tests =====================
@@ -331,12 +347,14 @@ contract TiltProtocolTest is Test {
         assertTrue(pending);
         assertEq(value, address(0xDEAD));
 
-        // Try to apply before timelock expires
+        // Try to apply before timelock expires (as curator)
+        vm.prank(curator);
         vm.expectRevert(UserVault.TimeLockNotExpired.selector);
         vault.applyRebalanceEngine();
 
         // Fast forward past timelock
         vm.warp(block.timestamp + 25 hours);
+        vm.prank(curator);
         vault.applyRebalanceEngine();
 
         // Verify applied
@@ -355,6 +373,7 @@ contract TiltProtocolTest is Test {
         assertEq(value, address(0xBEEF));
 
         vm.warp(block.timestamp + 25 hours);
+        vm.prank(curator);
         vault.applyTokenRouter();
 
         assertEq(address(vault.tokenRouter()), address(0xBEEF));
@@ -459,6 +478,130 @@ contract TiltProtocolTest is Test {
         vm.prank(address(factory));
         engine.setVaultAuthorized(address(0xABCD), true);
         assertTrue(engine.authorizedVaults(address(0xABCD)));
+    }
+
+    // ===================== Security Fix Tests =====================
+
+    function test_FeeManager_recordFees_accessControl() public {
+        // Unconfigured vault should not be able to record fees
+        vm.prank(alice);
+        vm.expectRevert("FeeManager: caller not a configured vault");
+        feeManager.recordFees(100e18);
+    }
+
+    function test_FeeManager_treasuryMigration() public {
+        // Give feeManager some USDC
+        usdc.mint(address(feeManager), 1000e18);
+        address mockVault = address(0x1234);
+        feeManager.configureVaultFees(mockVault, 0, address(0));
+        vm.prank(mockVault);
+        feeManager.recordFees(500e18);
+
+        // Verify fees accumulated to old treasury
+        assertEq(feeManager.accumulatedProtocolFees(treasury), 500e18);
+
+        // Change treasury
+        address newTreasury = makeAddr("newTreasury");
+        feeManager.setTreasury(newTreasury);
+
+        // Old treasury should have 0, new treasury should have the fees
+        assertEq(feeManager.accumulatedProtocolFees(treasury), 0);
+        assertEq(feeManager.accumulatedProtocolFees(newTreasury), 500e18);
+    }
+
+    function test_UserVault_cancelPendingEngine() public {
+        address vaultAddr = _createUserVault();
+        UserVault vault = UserVault(vaultAddr);
+
+        vm.prank(curator);
+        vault.setRebalanceEngine(address(0xDEAD));
+
+        (,, bool pending) = vault.pendingRebalanceEngine();
+        assertTrue(pending);
+
+        vm.prank(curator);
+        vault.cancelPendingRebalanceEngine();
+
+        (,, bool pendingAfter) = vault.pendingRebalanceEngine();
+        assertFalse(pendingAfter);
+    }
+
+    function test_UserVault_cancelPendingWeights() public {
+        address vaultAddr = _createUserVault();
+        UserVault vault = UserVault(vaultAddr);
+
+        IBaseVault.TokenWeight[] memory weights = new IBaseVault.TokenWeight[](2);
+        weights[0] = IBaseVault.TokenWeight({token: address(aapl), weightBps: 7000});
+        weights[1] = IBaseVault.TokenWeight({token: address(msft), weightBps: 3000});
+
+        vm.prank(curator);
+        vault.setTargetWeights(weights);
+        assertTrue(vault.hasPendingWeights());
+
+        vm.prank(curator);
+        vault.cancelPendingWeights();
+        assertFalse(vault.hasPendingWeights());
+    }
+
+    function test_UserVault_duplicateToken_reverts() public {
+        address vaultAddr = _createUserVault();
+        UserVault vault = UserVault(vaultAddr);
+
+        IBaseVault.TokenWeight[] memory weights = new IBaseVault.TokenWeight[](2);
+        weights[0] = IBaseVault.TokenWeight({token: address(aapl), weightBps: 5000});
+        weights[1] = IBaseVault.TokenWeight({token: address(aapl), weightBps: 5000});
+
+        vm.prank(curator);
+        vm.expectRevert(UserVault.DuplicateToken.selector);
+        vault.setTargetWeights(weights);
+    }
+
+    function test_UserVault_depositAndRebalance_accessControl() public {
+        address vaultAddr = _createUserVault();
+        UserVault vault = UserVault(vaultAddr);
+
+        // Random user should NOT be able to call depositAndRebalance
+        vm.startPrank(alice);
+        usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
+        vm.expectRevert(UserVault.UnauthorizedRebalance.selector);
+        vault.depositAndRebalance(DEPOSIT_AMOUNT, alice);
+        vm.stopPrank();
+    }
+
+    function test_Engine_accessControl_executeRebalance() public {
+        address vaultAddr = _createPoliticianVault();
+
+        // Random caller should not be able to execute rebalance for a vault
+        IRebalanceEngine.TradeOrder[] memory trades = new IRebalanceEngine.TradeOrder[](0);
+        vm.prank(alice);
+        vm.expectRevert(RebalanceEngine.UnauthorizedVault.selector);
+        engine.executeRebalance(vaultAddr, trades);
+    }
+
+    function test_Oracle_duplicateToken_reverts() public {
+        IBaseVault.TokenWeight[] memory weights = new IBaseVault.TokenWeight[](2);
+        weights[0] = IBaseVault.TokenWeight({token: address(aapl), weightBps: 5000});
+        weights[1] = IBaseVault.TokenWeight({token: address(aapl), weightBps: 5000});
+
+        vm.prank(keeper);
+        vm.expectRevert("PortfolioOracle: duplicate token");
+        oracle.updatePortfolio(PELOSI_ID, weights);
+    }
+
+    function test_FeeManager_rescueToken_guard() public {
+        // Give feeManager some USDC
+        usdc.mint(address(feeManager), 1000e18);
+        address mockVault = address(0x1234);
+        feeManager.configureVaultFees(mockVault, 0, address(0));
+        vm.prank(mockVault);
+        feeManager.recordFees(500e18);
+
+        // Should not be able to rescue more than unreserved amount
+        vm.expectRevert("FeeManager: would drain reserved fees");
+        feeManager.rescueToken(address(usdc), deployer, 600e18);
+
+        // Should be able to rescue up to the unreserved amount
+        feeManager.rescueToken(address(usdc), deployer, 500e18);
     }
 
     // ===================== Helpers =====================

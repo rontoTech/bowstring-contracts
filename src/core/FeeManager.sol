@@ -98,6 +98,12 @@ contract FeeManager is Ownable {
 
     function setTreasury(address _treasury) external onlyOwner {
         require(_treasury != address(0), "FeeManager: zero treasury");
+        // Migrate accumulated fees to new treasury
+        uint256 pending = accumulatedProtocolFees[protocolTreasury];
+        if (pending > 0) {
+            accumulatedProtocolFees[protocolTreasury] = 0;
+            accumulatedProtocolFees[_treasury] = pending;
+        }
         protocolTreasury = _treasury;
         emit TreasuryUpdated(_treasury);
     }
@@ -152,6 +158,7 @@ contract FeeManager is Ownable {
     /// @notice Record entry/exit fees from a vault, splitting between protocol and curator.
     ///         The vault must have already transferred the base asset to this contract.
     function recordFees(uint256 totalFeeAmount) external {
+        require(vaultFees[msg.sender].isConfigured, "FeeManager: caller not a configured vault");
         address vault = msg.sender;
         VaultFeeConfig memory config = vaultFees[vault];
 
@@ -194,6 +201,12 @@ contract FeeManager is Ownable {
     /// @notice Emergency rescue for any ERC-20 accidentally sent to this contract
     function rescueToken(address token, address to, uint256 amount) external onlyOwner {
         require(to != address(0), "FeeManager: zero address");
+        // Prevent draining accumulated base asset fees
+        if (token == address(baseAsset)) {
+            uint256 reservedFees = accumulatedProtocolFees[protocolTreasury];
+            uint256 contractBalance = baseAsset.balanceOf(address(this));
+            require(amount <= contractBalance - reservedFees, "FeeManager: would drain reserved fees");
+        }
         IERC20(token).safeTransfer(to, amount);
     }
 
@@ -209,6 +222,13 @@ contract FeeManager is Ownable {
             curator: address(0),
             isConfigured: false
         });
+    }
+
+    /// @notice Rescue ETH accidentally sent to this contract
+    function rescueEth(address payable to, uint256 amount) external onlyOwner {
+        require(to != address(0), "FeeManager: zero address");
+        (bool success,) = to.call{value: amount}("");
+        require(success, "FeeManager: ETH transfer failed");
     }
 
     receive() external payable {}

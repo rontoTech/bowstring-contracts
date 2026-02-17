@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ITokenRouter} from "../interfaces/ITokenRouter.sol";
@@ -9,7 +10,7 @@ import {ITokenRouter} from "../interfaces/ITokenRouter.sol";
 /// @title MockTokenRouter
 /// @notice Mock router for testnet - swaps at oracle price instantly.
 ///         Architecture is ready for future RFQ (Citadel) or DEX router.
-contract MockTokenRouter is ITokenRouter, Ownable {
+contract MockTokenRouter is ITokenRouter, Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     // --- Price oracle (simple mock) ---
@@ -72,7 +73,7 @@ contract MockTokenRouter is ITokenRouter, Ownable {
         uint256 amountIn,
         uint256 minAmountOut,
         address recipient
-    ) external override returns (uint256 amountOut) {
+    ) external override nonReentrant returns (uint256 amountOut) {
         if (!authorizedCallers[msg.sender]) revert UnauthorizedCaller();
         if (!pairSupported[tokenIn][tokenOut]) revert UnsupportedPair();
 

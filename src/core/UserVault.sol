@@ -55,11 +55,13 @@ contract UserVault is BaseVault {
     error OnlyCurator();
     error InvalidWeights();
     error TokenNotApproved();
+    error DuplicateToken();
     error RebalanceTooSoon();
     error PendingWeightsNotReady();
     error WeightsNotChanged();
     error NoPendingChange();
     error TimeLockNotExpired();
+    error UnauthorizedRebalance();
 
     modifier onlyCurator() {
         if (msg.sender != curator) revert OnlyCurator();
@@ -131,8 +133,8 @@ contract UserVault is BaseVault {
         }
     }
 
-    /// @notice Apply pending weights after time-lock expires
-    function applyPendingWeights() external {
+    /// @notice Apply pending weights after time-lock expires. Only curator can apply.
+    function applyPendingWeights() external onlyCurator {
         if (!hasPendingWeights) revert WeightsNotChanged();
         if (block.timestamp < pendingWeightChangeTime) revert PendingWeightsNotReady();
 
@@ -164,8 +166,8 @@ contract UserVault is BaseVault {
         }
     }
 
-    /// @notice Apply pending rebalance engine after time-lock
-    function applyRebalanceEngine() external {
+    /// @notice Apply pending rebalance engine after time-lock. Only curator can apply.
+    function applyRebalanceEngine() external onlyCurator {
         if (!pendingRebalanceEngine.pending) revert NoPendingChange();
         if (block.timestamp < pendingRebalanceEngine.effectiveTime) revert TimeLockNotExpired();
         rebalanceEngine = IRebalanceEngine(pendingRebalanceEngine.value);
@@ -189,8 +191,8 @@ contract UserVault is BaseVault {
         }
     }
 
-    /// @notice Apply pending token router after time-lock
-    function applyTokenRouter() external {
+    /// @notice Apply pending token router after time-lock. Only curator can apply.
+    function applyTokenRouter() external onlyCurator {
         if (!pendingTokenRouter.pending) revert NoPendingChange();
         if (block.timestamp < pendingTokenRouter.effectiveTime) revert TimeLockNotExpired();
         tokenRouter = ITokenRouter(pendingTokenRouter.value);
@@ -216,7 +218,7 @@ contract UserVault is BaseVault {
     }
 
     /// @notice Apply pending base asset after time-lock
-    function applyBaseAsset() external {
+    function applyBaseAsset() external onlyCurator {
         if (!pendingBaseAsset.pending) revert NoPendingChange();
         if (block.timestamp < pendingBaseAsset.effectiveTime) revert TimeLockNotExpired();
         address old = address(baseAsset);
@@ -225,16 +227,73 @@ contract UserVault is BaseVault {
         emit BaseAssetUpdated(old, pendingBaseAsset.value);
     }
 
+    // ===================== Cancel Pending Changes =====================
+
+    /// @notice Cancel a pending rebalance engine change
+    function cancelPendingRebalanceEngine() external onlyCurator {
+        if (!pendingRebalanceEngine.pending) revert NoPendingChange();
+        pendingRebalanceEngine.pending = false;
+        emit ConfigChangeCancelled("rebalanceEngine");
+    }
+
+    /// @notice Cancel a pending token router change
+    function cancelPendingTokenRouter() external onlyCurator {
+        if (!pendingTokenRouter.pending) revert NoPendingChange();
+        pendingTokenRouter.pending = false;
+        emit ConfigChangeCancelled("tokenRouter");
+    }
+
+    /// @notice Cancel a pending base asset change
+    function cancelPendingBaseAsset() external onlyCurator {
+        if (!pendingBaseAsset.pending) revert NoPendingChange();
+        pendingBaseAsset.pending = false;
+        emit ConfigChangeCancelled("baseAsset");
+    }
+
+    /// @notice Cancel pending weight changes
+    function cancelPendingWeights() external onlyCurator {
+        if (!hasPendingWeights) revert WeightsNotChanged();
+        delete _pendingWeights;
+        hasPendingWeights = false;
+        emit ConfigChangeCancelled("targetWeights");
+    }
+
+    // ===================== Withdrawal Slippage (time-locked) =====================
+
+    struct PendingUint256 {
+        uint256 value;
+        uint256 effectiveTime;
+        bool pending;
+    }
+
+    PendingUint256 public pendingWithdrawalSlippage;
+
     function setWithdrawalSlippage(uint256 _slippageBps) external override onlyCurator {
         require(_slippageBps <= 1000, "UserVault: slippage too high");
-        withdrawalSlippageBps = _slippageBps;
-        emit WithdrawalSlippageUpdated(_slippageBps);
+        if (weightChangeTimeLock == 0) {
+            withdrawalSlippageBps = _slippageBps;
+            emit WithdrawalSlippageUpdated(_slippageBps);
+        } else {
+            pendingWithdrawalSlippage = PendingUint256({
+                value: _slippageBps,
+                effectiveTime: block.timestamp + weightChangeTimeLock,
+                pending: true
+            });
+        }
+    }
+
+    function applyWithdrawalSlippage() external onlyCurator {
+        if (!pendingWithdrawalSlippage.pending) revert NoPendingChange();
+        if (block.timestamp < pendingWithdrawalSlippage.effectiveTime) revert TimeLockNotExpired();
+        withdrawalSlippageBps = pendingWithdrawalSlippage.value;
+        pendingWithdrawalSlippage.pending = false;
+        emit WithdrawalSlippageUpdated(pendingWithdrawalSlippage.value);
     }
 
     // ===================== Rebalance =====================
 
-    /// @notice Trigger rebalance - only curator
-    function rebalance() external override onlyCurator {
+    /// @notice Trigger rebalance - only curator. Protected against reentrancy and paused state.
+    function rebalance() external override onlyCurator nonReentrant whenNotPaused {
         if (block.timestamp - lastRebalanceTimestamp < minRebalanceInterval) {
             revert RebalanceTooSoon();
         }
@@ -244,12 +303,32 @@ contract UserVault is BaseVault {
         lastRebalanceTimestamp = block.timestamp;
     }
 
+    /// @notice Deposit + rebalance with same access control as rebalance().
+    ///         Prevents unauthorized callers from triggering rebalances via deposit.
+    function depositAndRebalance(uint256 assets, address receiver)
+        external
+        override
+        nonReentrant
+        whenNotPaused
+        returns (uint256 shares)
+    {
+        if (msg.sender != curator) revert UnauthorizedRebalance();
+        if (block.timestamp - lastRebalanceTimestamp < minRebalanceInterval) {
+            revert RebalanceTooSoon();
+        }
+        shares = _deposit(assets, receiver);
+        _executeRebalance();
+        lastRebalanceTimestamp = block.timestamp;
+    }
+
     // ===================== Emergency =====================
 
+    /// @notice Curator can pause vault operations
     function pause() external override onlyCurator {
         _pause();
     }
 
+    /// @notice Curator can unpause vault operations
     function unpause() external override onlyCurator {
         _unpause();
     }
@@ -272,6 +351,10 @@ contract UserVault is BaseVault {
         uint256 totalBps = 0;
         for (uint256 i = 0; i < weights.length; i++) {
             if (!approvedTokens[weights[i].token]) revert TokenNotApproved();
+            // Check for duplicate tokens
+            for (uint256 j = i + 1; j < weights.length; j++) {
+                if (weights[i].token == weights[j].token) revert DuplicateToken();
+            }
             totalBps += weights[i].weightBps;
         }
         if (totalBps != 10000) revert InvalidWeights();

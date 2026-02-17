@@ -14,6 +14,8 @@ import {IBaseVault} from "../interfaces/IBaseVault.sol";
 contract ChainlinkAdapter is Ownable {
     // --- State ---
     PortfolioOracle public oracle;
+    address public functionsRouter;
+    address public automationForwarder;
 
     // Politicians to monitor
     bytes32[] public monitoredPoliticians;
@@ -35,10 +37,13 @@ contract ChainlinkAdapter is Ownable {
     event OracleUpdateReceived(bytes32 indexed politicianId, uint256 numTokens);
     event PoliticianMonitored(bytes32 indexed politicianId, bool status);
     event VaultLinked(bytes32 indexed politicianId, address indexed vault);
+    event OracleFulfillmentFailed(bytes32 requestId, bytes err);
 
     // --- Errors ---
     error UpkeepNotNeeded();
     error InvalidRequestId();
+    error UnauthorizedFulfillment();
+    error UnauthorizedUpkeep();
 
     constructor(address _oracle) Ownable(msg.sender) {
         require(_oracle != address(0), "ChainlinkAdapter: zero oracle");
@@ -48,7 +53,17 @@ contract ChainlinkAdapter is Ownable {
     // ===================== Admin =====================
 
     function setOracle(address _oracle) external onlyOwner {
+        require(_oracle != address(0), "ChainlinkAdapter: zero oracle");
         oracle = PortfolioOracle(_oracle);
+    }
+
+    function setFunctionsRouter(address _router) external onlyOwner {
+        require(_router != address(0), "ChainlinkAdapter: zero router");
+        functionsRouter = _router;
+    }
+
+    function setAutomationForwarder(address _forwarder) external onlyOwner {
+        automationForwarder = _forwarder;
     }
 
     function setCheckInterval(uint256 _interval) external onlyOwner {
@@ -96,34 +111,55 @@ contract ChainlinkAdapter is Ownable {
 
     /// @notice Perform upkeep - trigger vault rebalances
     function performUpkeep(bytes calldata performData) external {
+        if (msg.sender != automationForwarder && msg.sender != owner()) {
+            revert UnauthorizedUpkeep();
+        }
+
         bytes32 politicianId = abi.decode(performData, (bytes32));
 
         // Trigger rebalance on all linked vaults
         address[] memory vaults = politicianVaults[politicianId];
+        bool anySuccess = false;
         for (uint256 i = 0; i < vaults.length; i++) {
             // Call rebalance on each vault - they handle their own auth
             (bool success,) = vaults[i].call(abi.encodeWithSignature("rebalance()"));
             // Don't revert if one vault fails
             if (success) {
+                anySuccess = true;
                 emit UpkeepPerformed(politicianId, block.timestamp);
             }
         }
 
-        lastCheckTimestamp = block.timestamp;
+        if (anySuccess) {
+            lastCheckTimestamp = block.timestamp;
+        }
     }
 
     // ===================== Chainlink Functions Callback =====================
 
     /// @notice Handle oracle fulfillment from Chainlink Functions
     /// @dev Expected data format: abi.encode(bytes32 politicianId, address[] tokens, uint16[] weights)
-    function handleOracleFulfillment(bytes32 requestId, bytes calldata response, bytes calldata /* err */ )
+    function handleOracleFulfillment(bytes32 requestId, bytes calldata response, bytes calldata err)
         external
     {
-        // In production, verify the caller is the Chainlink Functions router
-        // For testnet, we allow any caller (to be restricted)
+        if (msg.sender != functionsRouter && msg.sender != owner()) {
+            revert UnauthorizedFulfillment();
+        }
+
+        if (err.length > 0) {
+            emit OracleFulfillmentFailed(requestId, err);
+            return;
+        }
+
+        require(response.length > 0, "ChainlinkAdapter: empty response");
 
         (bytes32 politicianId, address[] memory tokens, uint16[] memory weights) =
             abi.decode(response, (bytes32, address[], uint16[]));
+
+        require(tokens.length == weights.length, "ChainlinkAdapter: array mismatch");
+
+        requestToPolitician[requestId] = politicianId;
+        latestRequestId = requestId;
 
         IBaseVault.TokenWeight[] memory tokenWeights = new IBaseVault.TokenWeight[](tokens.length);
         for (uint256 i = 0; i < tokens.length; i++) {

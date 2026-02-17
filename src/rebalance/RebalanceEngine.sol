@@ -82,7 +82,8 @@ contract RebalanceEngine is IRebalanceEngine, Ownable {
         TradeOrder[] memory tempTrades = new TradeOrder[](maxTrades);
         uint256 tradeCount = 0;
 
-        // Find tokens to sell (overweight)
+        // Find tokens to sell (overweight) and accumulate available base from sells
+        uint256 availableBaseFromSells = 0;
         for (uint256 i = 0; i < currentWeights.length; i++) {
             uint16 targetBps = _findWeight(currentWeights[i].token, targetWeights);
             if (currentWeights[i].weightBps > targetBps) {
@@ -90,6 +91,7 @@ contract RebalanceEngine is IRebalanceEngine, Ownable {
                 uint256 sellValueBase = (totalValue * excessBps) / 10000;
 
                 if (sellValueBase > 0) {
+                    availableBaseFromSells += sellValueBase;
                     uint256 sellAmountTokens =
                         tokenRouter.getQuote(baseAsset, currentWeights[i].token, sellValueBase);
                     uint256 minOut = (sellValueBase * (10000 - maxSlippageBps)) / 10000;
@@ -104,12 +106,23 @@ contract RebalanceEngine is IRebalanceEngine, Ownable {
             }
         }
 
-        // Find tokens to buy (underweight)
+        // First pass: compute total deficit BPS across all underweight tokens
+        uint256 totalDeficitBps = 0;
+        for (uint256 i = 0; i < targetWeights.length; i++) {
+            uint16 currentBps = _findWeight(targetWeights[i].token, currentWeights);
+            if (targetWeights[i].weightBps > currentBps) {
+                totalDeficitBps += targetWeights[i].weightBps - currentBps;
+            }
+        }
+
+        // Find tokens to buy (underweight). Buy amounts are scaled from available base from sells
+        // (not theoretical totalValue) so buys never exceed actual sell proceeds.
         for (uint256 i = 0; i < targetWeights.length; i++) {
             uint16 currentBps = _findWeight(targetWeights[i].token, currentWeights);
             if (targetWeights[i].weightBps > currentBps) {
                 uint256 deficitBps = targetWeights[i].weightBps - currentBps;
-                uint256 buyValue = (totalValue * deficitBps) / 10000;
+                uint256 buyValue =
+                    totalDeficitBps > 0 ? (availableBaseFromSells * deficitBps) / totalDeficitBps : 0;
                 if (buyValue > 0) {
                     uint256 expectedOut = tokenRouter.getQuote(baseAsset, targetWeights[i].token, buyValue);
                     uint256 minOut = (expectedOut * (10000 - maxSlippageBps)) / 10000;
@@ -133,7 +146,8 @@ contract RebalanceEngine is IRebalanceEngine, Ownable {
 
     /// @notice Execute rebalance trades through the token router
     function executeRebalance(address vault, TradeOrder[] calldata trades) external override {
-        if (!authorizedVaults[msg.sender] && !authorizedVaults[vault]) revert UnauthorizedVault();
+        if (msg.sender != vault && msg.sender != owner() && !authorizedCallers[msg.sender]) revert UnauthorizedVault();
+        if (!authorizedVaults[vault]) revert UnauthorizedVault();
         if (trades.length > maxTradesPerRebalance) revert TooManyTrades();
         if (address(tokenRouter) == address(0)) revert RouterNotSet();
 
@@ -144,10 +158,11 @@ contract RebalanceEngine is IRebalanceEngine, Ownable {
             IERC20(trade.tokenIn).safeTransferFrom(vault, address(this), trade.amountIn);
 
             // Approve router
-            IERC20(trade.tokenIn).safeIncreaseAllowance(address(tokenRouter), trade.amountIn);
+            IERC20(trade.tokenIn).forceApprove(address(tokenRouter), trade.amountIn);
 
             // Execute swap, sending output back to vault
             tokenRouter.swap(trade.tokenIn, trade.tokenOut, trade.amountIn, trade.minAmountOut, vault);
+            IERC20(trade.tokenIn).forceApprove(address(tokenRouter), 0);
         }
 
         emit RebalanceExecuted(vault, trades);

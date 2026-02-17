@@ -87,6 +87,13 @@ contract PortfolioOracle is IPortfolioOracle, Ownable {
         }
         if (totalBps != 10000) revert InvalidWeights();
 
+        // Check for duplicate tokens
+        for (uint256 i = 0; i < weights.length; i++) {
+            for (uint256 j = i + 1; j < weights.length; j++) {
+                require(weights[i].token != weights[j].token, "PortfolioOracle: duplicate token");
+            }
+        }
+
         // Store snapshot of previous portfolio
         if (_currentPortfolios[politicianId].length > 0) {
             PortfolioSnapshot storage snapshot = _snapshots[politicianId].push();
@@ -115,8 +122,10 @@ contract PortfolioOracle is IPortfolioOracle, Ownable {
         override
         returns (IBaseVault.TokenWeight[] memory)
     {
-        // Staleness check (skip if maxStaleness is 0 or data was never set)
-        if (maxStaleness > 0 && _lastUpdated[politicianId] > 0) {
+        if (maxStaleness > 0) {
+            if (_lastUpdated[politicianId] == 0) {
+                revert StaleData(politicianId, 0, maxStaleness);
+            }
             if (block.timestamp > _lastUpdated[politicianId] + maxStaleness) {
                 revert StaleData(politicianId, _lastUpdated[politicianId], maxStaleness);
             }

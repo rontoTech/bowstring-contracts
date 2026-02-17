@@ -48,10 +48,14 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
     event FeeSharesMinted(uint256 feeShares, address indexed recipient);
     event WithdrawalSlippageUpdated(uint256 newSlippageBps);
 
+    // --- Constants ---
+    uint256 public constant MIN_DEPOSIT = 1000; // minimum deposit to prevent dust attacks (below dead shares)
+
     // --- Errors ---
     error ZeroAmount();
     error ZeroAddress();
     error SlippageExceeded();
+    error DepositTooSmall();
 
     constructor(
         string memory _name,
@@ -83,9 +87,11 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
         shares = _deposit(assets, receiver);
     }
 
-    /// @notice Deposit base assets, receive shares, and immediately rebalance into target portfolio
+    /// @notice Deposit base assets, receive shares, and immediately rebalance into target portfolio.
+    ///         Subclasses MUST override to enforce rebalance access control.
     function depositAndRebalance(uint256 assets, address receiver)
         external
+        virtual
         nonReentrant
         whenNotPaused
         returns (uint256 shares)
@@ -94,7 +100,8 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
         _executeRebalance();
     }
 
-    /// @notice Deposit using EIP-2612 permit — approve + deposit in a single transaction
+    /// @notice Deposit using EIP-2612 permit — approve + deposit in a single transaction.
+    ///         Uses try-catch to handle front-running of permit signatures.
     function depositWithPermit(
         uint256 assets,
         address receiver,
@@ -103,13 +110,19 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
         bytes32 r,
         bytes32 s
     ) external nonReentrant whenNotPaused returns (uint256 shares) {
-        IERC20Permit(address(baseAsset)).permit(msg.sender, address(this), assets, deadline, v, r, s);
+        try IERC20Permit(address(baseAsset)).permit(msg.sender, address(this), assets, deadline, v, r, s) {}
+        catch {
+            // Permit may have been front-run; check if allowance is already sufficient
+            uint256 currentAllowance = IERC20(address(baseAsset)).allowance(msg.sender, address(this));
+            require(currentAllowance >= assets, "BaseVault: permit failed and insufficient allowance");
+        }
         shares = _deposit(assets, receiver);
     }
 
     /// @dev Internal deposit logic shared by all deposit variants
     function _deposit(uint256 assets, address receiver) internal returns (uint256 shares) {
         if (assets == 0) revert ZeroAmount();
+        if (assets < MIN_DEPOSIT) revert DepositTooSmall();
         if (receiver == address(0)) revert ZeroAddress();
 
         _accrueManagementFee();
@@ -149,7 +162,8 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
 
         _accrueManagementFee();
 
-        shares = _convertToShares(assets);
+        // Round shares UP to protect vault (ERC-4626 best practice)
+        shares = _convertToSharesCeil(assets);
         require(shares > 0, "BaseVault: zero shares");
 
         if (msg.sender != owner) {
@@ -289,15 +303,15 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
         uint256 totalValue = _totalAssets();
 
         if (address(rebalanceEngine) != address(0) && totalValue > 0) {
-            // Approve rebalance engine to move tokens
+            // Set exact approvals for rebalance engine (forceApprove avoids stale allowance buildup)
             uint256 baseBalance = baseAsset.balanceOf(address(this));
             if (baseBalance > 0) {
-                baseAsset.safeIncreaseAllowance(address(rebalanceEngine), baseBalance);
+                baseAsset.forceApprove(address(rebalanceEngine), baseBalance);
             }
             for (uint256 i = 0; i < heldTokens.length; i++) {
                 uint256 bal = IERC20(heldTokens[i]).balanceOf(address(this));
                 if (bal > 0) {
-                    IERC20(heldTokens[i]).safeIncreaseAllowance(address(rebalanceEngine), bal);
+                    IERC20(heldTokens[i]).forceApprove(address(rebalanceEngine), bal);
                 }
             }
 
@@ -308,9 +322,15 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
             if (trades.length > 0) {
                 rebalanceEngine.executeRebalance(address(this), trades);
             }
+
+            // Reset all approvals to 0 after rebalance to prevent residual allowance buildup
+            baseAsset.forceApprove(address(rebalanceEngine), 0);
+            for (uint256 i = 0; i < heldTokens.length; i++) {
+                IERC20(heldTokens[i]).forceApprove(address(rebalanceEngine), 0);
+            }
         }
 
-        // Update held tokens tracking from target weights
+        // Update held tokens tracking — preserves tokens with non-zero balances
         _updateHeldTokens(targetWeights);
 
         emit RebalanceTriggered(block.timestamp);
@@ -318,28 +338,45 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
 
     // ===================== Price Oracle / NAV =====================
 
-    /// @notice Calculate total vault value from actual token balances and prices
+    /// @notice Calculate total vault value from actual token balances and prices.
+    ///         Normalizes all token values to base asset decimals for correct NAV.
     function _totalAssets() internal view returns (uint256 total) {
         total = baseAsset.balanceOf(address(this));
+        uint256 baseDecimals = _tokenDecimals(address(baseAsset));
 
         if (address(tokenRouter) != address(0)) {
             uint256 basePrice = tokenRouter.getTokenPrice(address(baseAsset));
-            if (basePrice > 0) {
-                for (uint256 i = 0; i < heldTokens.length; i++) {
-                    address token = heldTokens[i];
-                    uint256 bal = IERC20(token).balanceOf(address(this));
-                    if (bal > 0) {
-                        uint256 tokenPrice = tokenRouter.getTokenPrice(token);
-                        if (tokenPrice > 0) {
-                            total += (bal * tokenPrice) / basePrice;
-                        }
+            require(basePrice > 0, "BaseVault: base asset price is zero");
+
+            for (uint256 i = 0; i < heldTokens.length; i++) {
+                address token = heldTokens[i];
+                uint256 bal = IERC20(token).balanceOf(address(this));
+                if (bal > 0) {
+                    uint256 tokenPrice = tokenRouter.getTokenPrice(token);
+                    require(tokenPrice > 0, "BaseVault: held token price is zero");
+
+                    uint256 tokenDec = _tokenDecimals(token);
+                    // Normalize: (bal * tokenPrice / basePrice) adjusted from tokenDecimals to baseDecimals
+                    if (tokenDec >= baseDecimals) {
+                        total += (bal * tokenPrice) / basePrice / (10 ** (tokenDec - baseDecimals));
+                    } else {
+                        total += (bal * tokenPrice) * (10 ** (baseDecimals - tokenDec)) / basePrice;
                     }
                 }
             }
         }
     }
 
-    /// @notice Value of a single held token in base asset terms
+    /// @dev Get decimals for a token, defaults to 18 if the call fails
+    function _tokenDecimals(address token) internal view returns (uint256) {
+        try ERC20(token).decimals() returns (uint8 d) {
+            return uint256(d);
+        } catch {
+            return 18;
+        }
+    }
+
+    /// @notice Value of a single held token in base asset terms, normalized to base decimals
     function _tokenValueInBase(address token) internal view returns (uint256) {
         if (address(tokenRouter) == address(0)) return 0;
         uint256 bal = IERC20(token).balanceOf(address(this));
@@ -349,13 +386,19 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
         uint256 basePrice = tokenRouter.getTokenPrice(address(baseAsset));
         if (tokenPrice == 0 || basePrice == 0) return 0;
 
-        return (bal * tokenPrice) / basePrice;
+        uint256 tokenDec = _tokenDecimals(token);
+        uint256 baseDec = _tokenDecimals(address(baseAsset));
+        if (tokenDec >= baseDec) {
+            return (bal * tokenPrice) / basePrice / (10 ** (tokenDec - baseDec));
+        } else {
+            return (bal * tokenPrice) * (10 ** (baseDec - tokenDec)) / basePrice;
+        }
     }
 
     // ===================== Liquidity Management =====================
 
     /// @notice Sell held tokens to ensure enough base asset for a withdrawal.
-    ///         Uses configurable slippage protection.
+    ///         Uses configurable slippage protection and verifies post-swap balance.
     function _ensureBaseLiquidity(uint256 needed) internal {
         uint256 baseBalance = baseAsset.balanceOf(address(this));
         if (baseBalance >= needed) return;
@@ -381,8 +424,8 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
             if (sellAmount > tokenBal) sellAmount = tokenBal;
             if (sellAmount == 0) continue;
 
-            // Approve and swap with slippage protection
-            IERC20(token).safeIncreaseAllowance(address(rebalanceEngine), sellAmount);
+            // Approve with forceApprove (avoids stale allowance buildup)
+            IERC20(token).forceApprove(address(rebalanceEngine), sellAmount);
 
             uint256 minOut = (sellValueBase * (10000 - withdrawalSlippageBps)) / 10000;
 
@@ -395,13 +438,23 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
             });
 
             rebalanceEngine.executeRebalance(address(this), trades);
+
+            // Reset approval after trade
+            IERC20(token).forceApprove(address(rebalanceEngine), 0);
+
+            // Early exit if we now have enough base asset
+            if (baseAsset.balanceOf(address(this)) >= needed) return;
         }
+
+        // Verify we have enough base asset after all sells
+        require(baseAsset.balanceOf(address(this)) >= needed, "BaseVault: insufficient liquidity after sells");
     }
 
     // ===================== Fee Logic =====================
 
     /// @notice Accrue management and performance fees via share dilution.
     ///         Fee shares are minted directly to protocol treasury and curator.
+    ///         HWM is captured BEFORE dilution to avoid double-charging performance fees.
     function _accrueManagementFee() internal {
         if (totalSupply() == 0) {
             lastFeeAccrualTimestamp = block.timestamp;
@@ -412,14 +465,15 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
         uint256 perfShares = _pendingPerformanceFeeShares();
         uint256 totalFeeShares = mgmtShares + perfShares;
 
-        if (totalFeeShares > 0) {
-            _mintFeeShares(totalFeeShares);
+        // Capture share price BEFORE minting fee shares (pre-dilution)
+        // This ensures HWM reflects the true performance, not the diluted price.
+        uint256 preDilutionPrice = _sharePrice();
+        if (preDilutionPrice > highWaterMark) {
+            highWaterMark = preDilutionPrice;
         }
 
-        // Update HWM after performance fee collection
-        uint256 currentPrice = _sharePrice();
-        if (currentPrice > highWaterMark) {
-            highWaterMark = currentPrice;
+        if (totalFeeShares > 0) {
+            _mintFeeShares(totalFeeShares);
         }
 
         lastFeeAccrualTimestamp = block.timestamp;
@@ -480,6 +534,7 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
 
     // ===================== Internal Helpers =====================
 
+    /// @dev Convert assets to shares (rounds DOWN — favors vault on deposits)
     function _convertToShares(uint256 assets) internal view returns (uint256) {
         uint256 supply = totalSupply();
         uint256 total = _totalAssets();
@@ -489,6 +544,17 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
         return assets.mulDiv(supply, total, Math.Rounding.Floor);
     }
 
+    /// @dev Convert assets to shares (rounds UP — used for withdrawals to protect vault)
+    function _convertToSharesCeil(uint256 assets) internal view returns (uint256) {
+        uint256 supply = totalSupply();
+        uint256 total = _totalAssets();
+        if (supply == 0 || total == 0) {
+            return assets; // 1:1
+        }
+        return assets.mulDiv(supply, total, Math.Rounding.Ceil);
+    }
+
+    /// @dev Convert shares to assets (rounds DOWN — favors vault on redemptions)
     function _convertToAssets(uint256 shares) internal view returns (uint256) {
         uint256 supply = totalSupply();
         uint256 total = _totalAssets();
@@ -498,23 +564,36 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
         return shares.mulDiv(total, supply, Math.Rounding.Floor);
     }
 
+    /// @dev Share price with full mulDiv precision (18 decimals)
     function _sharePrice() internal view returns (uint256) {
         if (totalSupply() == 0) return 1e18;
-        return (_totalAssets() * 1e18) / totalSupply();
+        return _totalAssets().mulDiv(1e18, totalSupply(), Math.Rounding.Floor);
     }
 
     function _updateHeldTokens(IBaseVault.TokenWeight[] memory weights) internal {
-        // Clear existing
-        for (uint256 i = 0; i < heldTokens.length; i++) {
-            isHeldToken[heldTokens[i]] = false;
+        // Snapshot old held tokens to check for orphaned balances
+        address[] memory oldTokens = heldTokens;
+
+        // Clear existing tracking
+        for (uint256 i = 0; i < oldTokens.length; i++) {
+            isHeldToken[oldTokens[i]] = false;
         }
         delete heldTokens;
 
-        // Set new
+        // Add tokens from new target weights
         for (uint256 i = 0; i < weights.length; i++) {
             if (weights[i].weightBps > 0 && !isHeldToken[weights[i].token]) {
                 heldTokens.push(weights[i].token);
                 isHeldToken[weights[i].token] = true;
+            }
+        }
+
+        // Preserve tokens with non-zero balances even if they left target weights.
+        // This prevents orphaning value from the NAV calculation.
+        for (uint256 i = 0; i < oldTokens.length; i++) {
+            if (!isHeldToken[oldTokens[i]] && IERC20(oldTokens[i]).balanceOf(address(this)) > 0) {
+                heldTokens.push(oldTokens[i]);
+                isHeldToken[oldTokens[i]] = true;
             }
         }
     }

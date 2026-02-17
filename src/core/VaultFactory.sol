@@ -32,8 +32,8 @@ contract VaultFactory is Ownable {
     uint256 public defaultTimeLock; // default time-lock for weight changes (24h)
     uint256 public defaultMinRebalanceInterval; // default min rebalance interval (4h)
 
-    // --- Dead shares constant ---
-    uint256 public constant DEAD_SHARE_AMOUNT = 1e3; // negligible: 0.000000000000001 tiltUSDC
+    // --- Dead shares constant (increased to 1e6 for stronger donation attack protection) ---
+    uint256 public constant DEAD_SHARE_AMOUNT = 1e6;
 
     // --- Token whitelist ---
     mapping(address => bool) public approvedTokens;
@@ -51,12 +51,15 @@ contract VaultFactory is Ownable {
     event MinSeedDepositUpdated(uint256 newMin);
     event DefaultOracleUpdated(address indexed oracle);
     event RebalanceEngineUpdated(address indexed engine);
+    event DefaultTimeLockUpdated(uint256 newTimeLock);
+    event DefaultRebalanceIntervalUpdated(uint256 newInterval);
 
     // --- Errors ---
     error InsufficientCreationFee();
     error InsufficientSeedDeposit();
     error TokenNotApproved();
     error InvalidWeights();
+    error DuplicateToken();
     error ZeroAddress();
 
     constructor(
@@ -68,6 +71,10 @@ contract VaultFactory is Ownable {
         address _defaultOracle
     ) Ownable(msg.sender) {
         require(_baseAsset != address(0), "VaultFactory: zero base asset");
+        require(_feeManager != address(0), "VaultFactory: zero fee manager");
+        require(_registry != address(0), "VaultFactory: zero registry");
+        require(_rebalanceEngine != address(0), "VaultFactory: zero engine");
+        require(_tokenRouter != address(0), "VaultFactory: zero router");
         baseAsset = _baseAsset;
         feeManager = FeeManager(payable(_feeManager));
         registry = VaultRegistry(_registry);
@@ -159,10 +166,12 @@ contract VaultFactory is Ownable {
 
     function setDefaultTimeLock(uint256 _timeLock) external onlyOwner {
         defaultTimeLock = _timeLock;
+        emit DefaultTimeLockUpdated(_timeLock);
     }
 
     function setDefaultMinRebalanceInterval(uint256 _interval) external onlyOwner {
         defaultMinRebalanceInterval = _interval;
+        emit DefaultRebalanceIntervalUpdated(_interval);
     }
 
     // ===================== Permissioned: Politician Vaults =====================
@@ -201,10 +210,13 @@ contract VaultFactory is Ownable {
 
         // Seed deposit with dead shares (donation attack protection)
         IERC20(baseAsset).safeTransferFrom(msg.sender, address(this), seedDeposit);
-        IERC20(baseAsset).approve(vault, seedDeposit);
+        IERC20(baseAsset).forceApprove(vault, seedDeposit);
 
         pVault.deposit(DEAD_SHARE_AMOUNT, address(1));
         pVault.deposit(seedDeposit - DEAD_SHARE_AMOUNT, msg.sender);
+
+        // Reset approval after seeding
+        IERC20(baseAsset).forceApprove(vault, 0);
 
         emit PoliticianVaultCreated(vault, politicianId, name, symbol);
     }
@@ -234,6 +246,10 @@ contract VaultFactory is Ownable {
         uint256 totalBps = 0;
         for (uint256 i = 0; i < tokens.length; i++) {
             if (!approvedTokens[tokens[i]]) revert TokenNotApproved();
+            // Check for duplicate tokens
+            for (uint256 j = i + 1; j < tokens.length; j++) {
+                if (tokens[i] == tokens[j]) revert DuplicateToken();
+            }
             totalBps += weights[i];
         }
         if (totalBps != 10000) revert InvalidWeights();
@@ -278,15 +294,25 @@ contract VaultFactory is Ownable {
 
         // Seed deposit with dead shares (donation attack protection)
         IERC20(baseAsset).safeTransferFrom(msg.sender, address(this), seedDeposit);
-        IERC20(baseAsset).approve(vault, seedDeposit);
+        IERC20(baseAsset).forceApprove(vault, seedDeposit);
 
         uVault.deposit(DEAD_SHARE_AMOUNT, address(1));
         uVault.deposit(seedDeposit - DEAD_SHARE_AMOUNT, msg.sender);
 
+        // Reset approval after seeding
+        IERC20(baseAsset).forceApprove(vault, 0);
+
         // Forward creation fee to protocol treasury
-        if (msg.value > 0) {
-            (bool success,) = feeManager.protocolTreasury().call{value: msg.value}("");
+        if (vaultCreationFee > 0) {
+            (bool success,) = feeManager.protocolTreasury().call{value: vaultCreationFee}("");
             require(success, "VaultFactory: fee transfer failed");
+        }
+
+        // Refund excess ETH to sender
+        uint256 excess = msg.value - vaultCreationFee;
+        if (excess > 0) {
+            (bool refundSuccess,) = payable(msg.sender).call{value: excess}("");
+            require(refundSuccess, "VaultFactory: ETH refund failed");
         }
 
         emit UserVaultCreated(vault, msg.sender, name, symbol);
