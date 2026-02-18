@@ -163,9 +163,12 @@ contract RebalanceEngine is IRebalanceEngine, Ownable {
         }
     }
 
-    /// @notice Execute rebalance trades through the token router
+    /// @notice Execute rebalance trades through the token router.
+    ///         Only the vault itself can trigger its own trades — this prevents
+    ///         the engine owner or authorized callers from executing arbitrary
+    ///         trades against user vaults (critical security invariant).
     function executeRebalance(address vault, TradeOrder[] calldata trades) external override {
-        if (msg.sender != vault && msg.sender != owner() && !authorizedCallers[msg.sender]) revert UnauthorizedVault();
+        if (msg.sender != vault) revert UnauthorizedVault();
         if (!authorizedVaults[vault]) revert UnauthorizedVault();
         if (trades.length > maxTradesPerRebalance) revert TooManyTrades();
         if (address(tokenRouter) == address(0)) revert RouterNotSet();

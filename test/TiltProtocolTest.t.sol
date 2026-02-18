@@ -926,6 +926,175 @@ contract TiltProtocolTest is Test {
         assertApproxEqRel(nvdaFrac, 0.114285714285714285e18, 0.01e18);
     }
 
+    // ===================== C-01: Withdraw/Redeem while paused =====================
+
+    function test_C01_withdrawAllowedWhilePaused() public {
+        address vaultAddr = _createPoliticianVault();
+        PoliticianVault vault = PoliticianVault(vaultAddr);
+
+        // Alice deposits
+        vm.startPrank(alice);
+        usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
+        vault.deposit(DEPOSIT_AMOUNT, alice);
+        vm.stopPrank();
+
+        // Owner pauses the vault
+        vault.pause();
+        assertTrue(vault.paused());
+
+        // Deposits should be blocked
+        vm.startPrank(bob);
+        usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
+        vm.expectRevert();
+        vault.deposit(DEPOSIT_AMOUNT, bob);
+        vm.stopPrank();
+
+        // But Alice CAN still withdraw (redeem) while paused
+        uint256 aliceShares = vault.balanceOf(alice);
+        vm.startPrank(alice);
+        uint256 assets = vault.redeem(aliceShares, alice, alice);
+        vm.stopPrank();
+
+        assertTrue(assets > 0, "should receive assets while paused");
+        assertEq(vault.balanceOf(alice), 0, "all shares should be burned");
+    }
+
+    // ===================== C-02: PoliticianVault timelock =====================
+
+    function test_C02_politicianVault_timelocked_setTokenRouter() public {
+        address vaultAddr = _createPoliticianVault();
+        PoliticianVault vault = PoliticianVault(vaultAddr);
+
+        // Propose new router
+        vault.setTokenRouter(address(0xBEEF));
+
+        // Should be pending
+        (address value, uint256 effectiveTime, bool pending) = vault.pendingTokenRouter();
+        assertTrue(pending, "should be pending");
+        assertEq(value, address(0xBEEF));
+
+        // Cannot apply before timelock
+        vm.expectRevert(PoliticianVault.TimeLockNotExpired.selector);
+        vault.applyTokenRouter();
+
+        // Fast forward past timelock (24 hours default)
+        vm.warp(block.timestamp + 25 hours);
+        vault.applyTokenRouter();
+
+        assertEq(address(vault.tokenRouter()), address(0xBEEF), "router should be updated");
+    }
+
+    function test_C02_politicianVault_cancelPendingEngine() public {
+        address vaultAddr = _createPoliticianVault();
+        PoliticianVault vault = PoliticianVault(vaultAddr);
+
+        vault.setRebalanceEngine(address(0xDEAD));
+        (,, bool pending) = vault.pendingRebalanceEngine();
+        assertTrue(pending);
+
+        vault.cancelPendingRebalanceEngine();
+        (,, bool pendingAfter) = vault.pendingRebalanceEngine();
+        assertFalse(pendingAfter);
+    }
+
+    // ===================== C-03: Engine execution restricted to vault =====================
+
+    function test_C03_engineOwnerCannotExecuteForVault() public {
+        address vaultAddr = _createPoliticianVault();
+
+        // Owner tries to execute arbitrary trades on the vault
+        IRebalanceEngine.TradeOrder[] memory trades = new IRebalanceEngine.TradeOrder[](0);
+        vm.expectRevert(RebalanceEngine.UnauthorizedVault.selector);
+        engine.executeRebalance(vaultAddr, trades);
+    }
+
+    // ===================== H-01: Emergency Withdraw =====================
+
+    function test_H01_emergencyWithdraw_afterRebalance() public {
+        address vaultAddr = _createPoliticianVault();
+        PoliticianVault vault = PoliticianVault(vaultAddr);
+        vault.setKeeper(keeper, true);
+
+        // Alice deposits and vault rebalances
+        vm.startPrank(alice);
+        usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
+        vault.deposit(DEPOSIT_AMOUNT, alice);
+        vm.stopPrank();
+
+        vm.prank(keeper);
+        vault.rebalance();
+
+        // Verify vault holds stock tokens
+        assertTrue(aapl.balanceOf(vaultAddr) > 0, "vault should hold AAPL");
+
+        // Alice emergency withdraws — should get pro-rata of ALL tokens
+        uint256 aliceShares = vault.balanceOf(alice);
+        assertTrue(aliceShares > 0);
+
+        vm.prank(alice);
+        vault.emergencyWithdraw();
+
+        assertEq(vault.balanceOf(alice), 0, "all shares burned");
+        assertTrue(usdc.balanceOf(alice) > 0 || aapl.balanceOf(alice) > 0, "should receive tokens");
+    }
+
+    function test_H01_emergencyWithdraw_whilePaused() public {
+        address vaultAddr = _createPoliticianVault();
+        PoliticianVault vault = PoliticianVault(vaultAddr);
+        vault.setKeeper(keeper, true);
+
+        // Alice deposits
+        vm.startPrank(alice);
+        usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
+        vault.deposit(DEPOSIT_AMOUNT, alice);
+        vm.stopPrank();
+
+        vm.prank(keeper);
+        vault.rebalance();
+
+        // Pause the vault
+        vault.pause();
+        assertTrue(vault.paused());
+
+        // Emergency withdraw should STILL work even while paused
+        vm.prank(alice);
+        vault.emergencyWithdraw();
+
+        assertEq(vault.balanceOf(alice), 0, "all shares burned");
+    }
+
+    function test_H01_emergencyWithdraw_oracleDown() public {
+        address vaultAddr = _createPoliticianVault();
+        PoliticianVault vault = PoliticianVault(vaultAddr);
+        vault.setKeeper(keeper, true);
+
+        // Alice deposits and vault rebalances
+        vm.startPrank(alice);
+        usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
+        vault.deposit(DEPOSIT_AMOUNT, alice);
+        vm.stopPrank();
+
+        vm.prank(keeper);
+        vault.rebalance();
+
+        // Break the oracle — clear ALL prices
+        router.clearTokenPrice(address(aapl));
+        router.clearTokenPrice(address(msft));
+        router.clearTokenPrice(address(nvda));
+
+        // Normal redeem should fail (oracle broken → _totalAssets reverts or 0)
+        // But emergency withdraw should STILL work
+        vm.prank(alice);
+        vault.emergencyWithdraw();
+
+        assertEq(vault.balanceOf(alice), 0, "all shares burned");
+        // Alice should have received stock tokens directly
+        assertTrue(
+            aapl.balanceOf(alice) > 0 || msft.balanceOf(alice) > 0 || nvda.balanceOf(alice) > 0,
+            "should receive stock tokens"
+        );
+    }
+
     // ===================== Helpers =====================
 
     function _seedOraclePortfolio() internal {

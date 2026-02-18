@@ -22,12 +22,31 @@ contract PoliticianVault is BaseVault, Ownable {
     // --- Access control ---
     mapping(address => bool) public isKeeper; // Chainlink Automation addresses
 
+    // --- Admin time-lock (prevents instant infrastructure swaps) ---
+    uint256 public adminTimeLock = 24 hours;
+
+    struct PendingAddress {
+        address value;
+        uint256 effectiveTime;
+        bool pending;
+    }
+
+    PendingAddress public pendingRebalanceEngine;
+    PendingAddress public pendingTokenRouter;
+    PendingAddress public pendingBaseAsset;
+
     // --- Events ---
     event KeeperUpdated(address indexed keeper, bool status);
     event OracleUpdated(address indexed newOracle);
+    event AdminTimeLockUpdated(uint256 newTimeLock);
+    event ConfigChangeProposed(bytes32 indexed configKey, address newValue, uint256 effectiveTime);
+    event ConfigChangeApplied(bytes32 indexed configKey, address newValue);
+    event ConfigChangeCancelled(bytes32 indexed configKey);
 
     // --- Errors ---
     error UnauthorizedRebalance();
+    error NoPendingChange();
+    error TimeLockNotExpired();
 
     constructor(
         string memory _name,
@@ -56,27 +75,90 @@ contract PoliticianVault is BaseVault, Ownable {
         emit KeeperUpdated(keeper, status);
     }
 
+    function setAdminTimeLock(uint256 _timeLock) external onlyOwner {
+        adminTimeLock = _timeLock;
+        emit AdminTimeLockUpdated(_timeLock);
+    }
+
     function setOracle(address _oracle) external onlyOwner {
         require(_oracle != address(0), "PoliticianVault: zero oracle");
         oracle = IPortfolioOracle(_oracle);
         emit OracleUpdated(_oracle);
     }
 
+    // --- Time-locked infrastructure changes ---
+
     function setRebalanceEngine(address _engine) external override onlyOwner {
         require(_engine != address(0), "PoliticianVault: zero engine");
-        rebalanceEngine = IRebalanceEngine(_engine);
+        pendingRebalanceEngine = PendingAddress({
+            value: _engine,
+            effectiveTime: block.timestamp + adminTimeLock,
+            pending: true
+        });
+        emit ConfigChangeProposed("rebalanceEngine", _engine, pendingRebalanceEngine.effectiveTime);
+    }
+
+    function applyRebalanceEngine() external onlyOwner {
+        if (!pendingRebalanceEngine.pending) revert NoPendingChange();
+        if (block.timestamp < pendingRebalanceEngine.effectiveTime) revert TimeLockNotExpired();
+        rebalanceEngine = IRebalanceEngine(pendingRebalanceEngine.value);
+        pendingRebalanceEngine.pending = false;
+        emit ConfigChangeApplied("rebalanceEngine", pendingRebalanceEngine.value);
+    }
+
+    function cancelPendingRebalanceEngine() external onlyOwner {
+        if (!pendingRebalanceEngine.pending) revert NoPendingChange();
+        pendingRebalanceEngine.pending = false;
+        emit ConfigChangeCancelled("rebalanceEngine");
     }
 
     function setTokenRouter(address _router) external override onlyOwner {
         require(_router != address(0), "PoliticianVault: zero router");
-        tokenRouter = ITokenRouter(_router);
+        pendingTokenRouter = PendingAddress({
+            value: _router,
+            effectiveTime: block.timestamp + adminTimeLock,
+            pending: true
+        });
+        emit ConfigChangeProposed("tokenRouter", _router, pendingTokenRouter.effectiveTime);
+    }
+
+    function applyTokenRouter() external onlyOwner {
+        if (!pendingTokenRouter.pending) revert NoPendingChange();
+        if (block.timestamp < pendingTokenRouter.effectiveTime) revert TimeLockNotExpired();
+        tokenRouter = ITokenRouter(pendingTokenRouter.value);
+        pendingTokenRouter.pending = false;
+        emit ConfigChangeApplied("tokenRouter", pendingTokenRouter.value);
+    }
+
+    function cancelPendingTokenRouter() external onlyOwner {
+        if (!pendingTokenRouter.pending) revert NoPendingChange();
+        pendingTokenRouter.pending = false;
+        emit ConfigChangeCancelled("tokenRouter");
     }
 
     function setBaseAsset(address _baseAsset) external override onlyOwner {
         require(_baseAsset != address(0), "PoliticianVault: zero base asset");
+        pendingBaseAsset = PendingAddress({
+            value: _baseAsset,
+            effectiveTime: block.timestamp + adminTimeLock,
+            pending: true
+        });
+        emit ConfigChangeProposed("baseAsset", _baseAsset, pendingBaseAsset.effectiveTime);
+    }
+
+    function applyBaseAsset() external onlyOwner {
+        if (!pendingBaseAsset.pending) revert NoPendingChange();
+        if (block.timestamp < pendingBaseAsset.effectiveTime) revert TimeLockNotExpired();
         address old = address(baseAsset);
-        baseAsset = IERC20(_baseAsset);
-        emit BaseAssetUpdated(old, _baseAsset);
+        baseAsset = IERC20(pendingBaseAsset.value);
+        pendingBaseAsset.pending = false;
+        emit BaseAssetUpdated(old, pendingBaseAsset.value);
+    }
+
+    function cancelPendingBaseAsset() external onlyOwner {
+        if (!pendingBaseAsset.pending) revert NoPendingChange();
+        pendingBaseAsset.pending = false;
+        emit ConfigChangeCancelled("baseAsset");
     }
 
     function setWithdrawalSlippage(uint256 _slippageBps) external override onlyOwner {

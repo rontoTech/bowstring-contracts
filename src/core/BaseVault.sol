@@ -174,11 +174,11 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
         emit Deposited(receiver, assets, shares);
     }
 
-    /// @notice Withdraw base assets by burning vault shares
+    /// @notice Withdraw base assets by burning vault shares.
+    ///         NOT guarded by whenNotPaused — users must always be able to exit.
     function withdraw(uint256 assets, address receiver, address owner)
         external
         nonReentrant
-        whenNotPaused
         returns (uint256 shares)
     {
         if (assets == 0) revert ZeroAmount();
@@ -216,11 +216,11 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
         emit Withdrawn(receiver, assets, shares);
     }
 
-    /// @notice Redeem shares for base assets
+    /// @notice Redeem shares for base assets.
+    ///         NOT guarded by whenNotPaused — users must always be able to exit.
     function redeem(uint256 shares, address receiver, address owner)
         external
         nonReentrant
-        whenNotPaused
         returns (uint256 assets)
     {
         if (shares == 0) revert ZeroAmount();
@@ -253,6 +253,46 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
         baseAsset.safeTransfer(receiver, netAssets);
 
         emit Withdrawn(receiver, assets, shares);
+    }
+
+    // ===================== Emergency Withdrawal =====================
+
+    /// @notice Emergency exit — burn shares and receive pro-rata of ALL held tokens.
+    ///         Works even when paused, does NOT use the router or rebalance engine,
+    ///         charges NO fees. Returns a basket of underlying tokens rather than
+    ///         pure base asset, naturally disincentivizing use during normal operation.
+    ///
+    ///         This is the last-resort escape hatch when the normal withdraw/redeem
+    ///         path is broken (e.g., router down, oracle returning zero, engine
+    ///         deauthorized, or a held token blocking sells).
+    event EmergencyWithdrawn(address indexed user, uint256 shares);
+
+    function emergencyWithdraw() external nonReentrant {
+        uint256 shares = balanceOf(msg.sender);
+        require(shares > 0, "BaseVault: no shares to withdraw");
+
+        uint256 supply = totalSupply();
+        _burn(msg.sender, shares);
+
+        // Pro-rata base asset
+        uint256 baseBal = baseAsset.balanceOf(address(this));
+        if (baseBal > 0) {
+            uint256 baseShare = (baseBal * shares) / supply;
+            if (baseShare > 0) baseAsset.safeTransfer(msg.sender, baseShare);
+        }
+
+        // Pro-rata of each held token
+        for (uint256 i = 0; i < heldTokens.length; i++) {
+            uint256 bal = IERC20(heldTokens[i]).balanceOf(address(this));
+            if (bal > 0) {
+                uint256 tokenShare = (bal * shares) / supply;
+                if (tokenShare > 0) {
+                    IERC20(heldTokens[i]).safeTransfer(msg.sender, tokenShare);
+                }
+            }
+        }
+
+        emit EmergencyWithdrawn(msg.sender, shares);
     }
 
     // ===================== Views =====================
