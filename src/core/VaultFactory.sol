@@ -83,7 +83,7 @@ contract VaultFactory is Ownable {
         defaultOracle = _defaultOracle;
 
         vaultCreationFee = 0.01 ether;
-        minSeedDeposit = 100e18; // 100 tiltUSDC (18 decimals)
+        minSeedDeposit = 100e6; // 100 tiltUSDC (6 decimals)
         defaultTimeLock = 24 hours;
         defaultMinRebalanceInterval = 4 hours;
     }

@@ -44,9 +44,9 @@ contract TiltProtocolTest is Test {
 
     // --- Test constants ---
     bytes32 public constant PELOSI_ID = keccak256("nancy-pelosi");
-    uint256 public constant INITIAL_USDC = 100_000e18; // 100k tiltUSDC (18 dec)
-    uint256 public constant DEPOSIT_AMOUNT = 10_000e18; // 10k tiltUSDC
-    uint256 public constant SEED_AMOUNT = 1000e18; // 1k tiltUSDC seed
+    uint256 public constant INITIAL_USDC = 100_000e6; // 100k tiltUSDC (6 dec)
+    uint256 public constant DEPOSIT_AMOUNT = 10_000e6; // 10k tiltUSDC
+    uint256 public constant SEED_AMOUNT = 1000e6; // 1k tiltUSDC seed
 
     function setUp() public {
         // Deploy base tokens
@@ -109,11 +109,11 @@ contract TiltProtocolTest is Test {
         usdc.mint(bob, INITIAL_USDC);
         usdc.mint(curator, INITIAL_USDC);
 
-        // Fund router with stock tokens for swaps
+        // Fund router with stock tokens for swaps (18-dec tokens)
         aapl.mint(address(router), 1_000_000e18);
         msft.mint(address(router), 1_000_000e18);
         nvda.mint(address(router), 1_000_000e18);
-        usdc.mint(address(router), 1_000_000e18);
+        usdc.mint(address(router), 1_000_000e6);
     }
 
     // ===================== FeeManager Tests =====================
@@ -127,7 +127,7 @@ contract TiltProtocolTest is Test {
 
     function test_FeeManager_ERC20_withdrawal() public {
         // Send some tiltUSDC to feeManager to simulate accumulated fees
-        usdc.mint(address(feeManager), 1000e18);
+        usdc.mint(address(feeManager), 1000e6);
 
         // Configure vault fees (deployer is FeeManager owner, so authorized)
         address mockVault = address(0x1234);
@@ -135,13 +135,13 @@ contract TiltProtocolTest is Test {
 
         // Accumulate protocol fees by calling recordFees from the mock vault
         vm.prank(mockVault);
-        feeManager.recordFees(500e18);
+        feeManager.recordFees(500e6);
 
         uint256 treasuryBalanceBefore = usdc.balanceOf(treasury);
         feeManager.collectProtocolFees();
         uint256 treasuryBalanceAfter = usdc.balanceOf(treasury);
 
-        assertEq(treasuryBalanceAfter - treasuryBalanceBefore, 500e18);
+        assertEq(treasuryBalanceAfter - treasuryBalanceBefore, 500e6);
     }
 
     // ===================== Oracle Tests =====================
@@ -398,17 +398,17 @@ contract TiltProtocolTest is Test {
     // ===================== Router Tests =====================
 
     function test_Router_getQuote() public view {
-        // 195 tiltUSDC should get 1 tiltAAPL
-        uint256 quote = router.getQuote(address(usdc), address(aapl), 195e18);
+        // 195 tiltUSDC (6 dec) should get 1 tiltAAPL (18 dec), normalized for decimals
+        uint256 quote = router.getQuote(address(usdc), address(aapl), 195e6);
         assertEq(quote, 1e18);
     }
 
     function test_Router_swap() public {
-        usdc.mint(address(this), 195e18);
-        usdc.approve(address(router), 195e18);
+        usdc.mint(address(this), 195e6);
+        usdc.approve(address(router), 195e6);
 
         router.setAuthorizedCaller(address(this), true);
-        uint256 out = router.swap(address(usdc), address(aapl), 195e18, 0, address(this));
+        uint256 out = router.swap(address(usdc), address(aapl), 195e6, 0, address(this));
         assertEq(out, 1e18);
         assertEq(aapl.balanceOf(address(this)), 1e18);
     }
@@ -424,7 +424,7 @@ contract TiltProtocolTest is Test {
         vm.prank(alice);
         usdc.faucet();
         // Alice had INITIAL_USDC from setUp, plus 10,000 from faucet
-        assertEq(usdc.balanceOf(alice), INITIAL_USDC + 10_000e18);
+        assertEq(usdc.balanceOf(alice), INITIAL_USDC + 10_000e6);
     }
 
     function test_TiltUSDC_faucet_cooldown() public {
@@ -487,19 +487,19 @@ contract TiltProtocolTest is Test {
         // Unconfigured vault should not be able to record fees
         vm.prank(alice);
         vm.expectRevert("FeeManager: caller not a configured vault");
-        feeManager.recordFees(100e18);
+        feeManager.recordFees(100e6);
     }
 
     function test_FeeManager_treasuryMigration() public {
         // Give feeManager some USDC
-        usdc.mint(address(feeManager), 1000e18);
+        usdc.mint(address(feeManager), 1000e6);
         address mockVault = address(0x1234);
         feeManager.configureVaultFees(mockVault, 0, address(0));
         vm.prank(mockVault);
-        feeManager.recordFees(500e18);
+        feeManager.recordFees(500e6);
 
         // Verify fees accumulated to old treasury
-        assertEq(feeManager.accumulatedProtocolFees(treasury), 500e18);
+        assertEq(feeManager.accumulatedProtocolFees(treasury), 500e6);
 
         // Change treasury
         address newTreasury = makeAddr("newTreasury");
@@ -507,7 +507,7 @@ contract TiltProtocolTest is Test {
 
         // Old treasury should have 0, new treasury should have the fees
         assertEq(feeManager.accumulatedProtocolFees(treasury), 0);
-        assertEq(feeManager.accumulatedProtocolFees(newTreasury), 500e18);
+        assertEq(feeManager.accumulatedProtocolFees(newTreasury), 500e6);
     }
 
     function test_UserVault_cancelPendingEngine() public {
@@ -591,18 +591,18 @@ contract TiltProtocolTest is Test {
 
     function test_FeeManager_rescueToken_guard() public {
         // Give feeManager some USDC
-        usdc.mint(address(feeManager), 1000e18);
+        usdc.mint(address(feeManager), 1000e6);
         address mockVault = address(0x1234);
         feeManager.configureVaultFees(mockVault, 0, address(0));
         vm.prank(mockVault);
-        feeManager.recordFees(500e18);
+        feeManager.recordFees(500e6);
 
         // Should not be able to rescue more than unreserved amount
         vm.expectRevert("FeeManager: would drain reserved fees");
-        feeManager.rescueToken(address(usdc), deployer, 600e18);
+        feeManager.rescueToken(address(usdc), deployer, 600e6);
 
         // Should be able to rescue up to the unreserved amount
-        feeManager.rescueToken(address(usdc), deployer, 500e18);
+        feeManager.rescueToken(address(usdc), deployer, 500e6);
     }
 
     // ===================== F-01: Rebalance Buy Budget includes Unallocated Base =====================
@@ -677,7 +677,7 @@ contract TiltProtocolTest is Test {
     // ===================== F-03: Curator Fees Protected in rescueToken =====================
 
     function test_FeeManager_rescueToken_protectsCuratorFees() public {
-        usdc.mint(address(feeManager), 1000e18);
+        usdc.mint(address(feeManager), 1000e6);
 
         // Configure vault with 50% curator split
         address mockVault = address(0x5678);
@@ -685,7 +685,7 @@ contract TiltProtocolTest is Test {
 
         // Record fees (500 protocol + 500 curator)
         vm.prank(mockVault);
-        feeManager.recordFees(1000e18);
+        feeManager.recordFees(1000e6);
 
         // Total reserved = 500 protocol + 500 curator = 1000
         // Contract balance is 1000, so nothing should be rescuable
@@ -837,6 +837,95 @@ contract TiltProtocolTest is Test {
         feeManager.configureVaultFees(mockVault, 5000, curator);
     }
 
+    // ===================== Integration: 6-dec USDC + 18-dec stocks =====================
+
+    /// @notice Full lifecycle test: deposit (6-dec USDC) -> rebalance (buy 18-dec stocks)
+    ///         -> verify NAV -> price change -> withdraw. Validates cross-decimal math
+    ///         across BaseVault, RebalanceEngine, TokenRouter, and FeeManager.
+    function test_integration_fullCycle_crossDecimal() public {
+        address vaultAddr = _createPoliticianVault();
+        PoliticianVault vault = PoliticianVault(vaultAddr);
+        vault.setKeeper(keeper, true);
+
+        // --- Vault share token should report 6 decimals (matching base asset) ---
+        assertEq(vault.decimals(), 6, "share decimals should match USDC");
+
+        // --- 1. Deposit 10,000 USDC (6 dec) ---
+        vm.startPrank(alice);
+        usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
+        uint256 shares = vault.deposit(DEPOSIT_AMOUNT, alice);
+        vm.stopPrank();
+
+        assertTrue(shares > 0, "should receive shares");
+        // Share price should be ~1e18 (no fees in test)
+        uint256 priceBefore = vault.sharePrice();
+        assertApproxEqRel(priceBefore, 1e18, 0.01e18);
+
+        // --- 2. Rebalance into 18-dec stock tokens ---
+        vm.prank(keeper);
+        vault.rebalance();
+
+        // NAV should be preserved (within rounding)
+        uint256 navAfterRebalance = vault.totalAssets();
+        uint256 expectedNav = SEED_AMOUNT + DEPOSIT_AMOUNT;
+        assertApproxEqRel(navAfterRebalance, expectedNav, 0.02e18);
+
+        // Vault should hold stock tokens
+        address[] memory held = vault.getHeldTokens();
+        assertTrue(held.length == 3, "should hold 3 stock tokens");
+
+        // Share price should remain ~1e18
+        assertApproxEqRel(vault.sharePrice(), 1e18, 0.02e18);
+
+        // --- 3. Simulate price increase: AAPL $195 -> $250 ---
+        router.setTokenPrice(address(aapl), 250e18);
+        uint256 navAfterPriceUp = vault.totalAssets();
+        assertTrue(navAfterPriceUp > navAfterRebalance, "NAV should increase with AAPL price");
+
+        // Share price should be above 1e18
+        uint256 priceAfterUp = vault.sharePrice();
+        assertTrue(priceAfterUp > 1e18, "share price should reflect gains");
+
+        // --- 4. Withdraw half of Alice's shares ---
+        uint256 aliceShares = vault.balanceOf(alice);
+        uint256 redeemShares = aliceShares / 2;
+        uint256 aliceUsdcBefore = usdc.balanceOf(alice);
+
+        vm.startPrank(alice);
+        uint256 assetsOut = vault.redeem(redeemShares, alice, alice);
+        vm.stopPrank();
+
+        // Alice should receive USDC (6 dec)
+        assertTrue(assetsOut > 0, "should receive assets");
+        uint256 aliceUsdcAfter = usdc.balanceOf(alice);
+        assertEq(aliceUsdcAfter - aliceUsdcBefore, assetsOut, "USDC balance should match redeem");
+
+        // Assets should be in reasonable range (>= half of original deposit, since price went up)
+        assertTrue(assetsOut >= DEPOSIT_AMOUNT / 2, "withdrawal should reflect gains");
+    }
+
+    /// @notice Verify the router produces correct cross-decimal quotes in both directions
+    function test_integration_routerCrossDecimalQuotes() public view {
+        // USDC (6 dec) -> AAPL (18 dec): 195 USDC should buy 1 AAPL
+        uint256 aaplOut = router.getQuote(address(usdc), address(aapl), 195e6);
+        assertEq(aaplOut, 1e18, "195 USDC should buy 1 AAPL");
+
+        // AAPL (18 dec) -> USDC (6 dec): 1 AAPL should sell for 195 USDC
+        uint256 usdcOut = router.getQuote(address(aapl), address(usdc), 1e18);
+        assertEq(usdcOut, 195e6, "1 AAPL should sell for 195 USDC");
+
+        // MSFT: 420 USDC -> 1 MSFT, and back
+        uint256 msftOut = router.getQuote(address(usdc), address(msft), 420e6);
+        assertEq(msftOut, 1e18, "420 USDC should buy 1 MSFT");
+        uint256 usdcFromMsft = router.getQuote(address(msft), address(usdc), 1e18);
+        assertEq(usdcFromMsft, 420e6, "1 MSFT should sell for 420 USDC");
+
+        // Fractional: 100 USDC of NVDA at $875
+        uint256 nvdaFrac = router.getQuote(address(usdc), address(nvda), 100e6);
+        // 100 / 875 = 0.11428... NVDA = ~0.11428e18
+        assertApproxEqRel(nvdaFrac, 0.114285714285714285e18, 0.01e18);
+    }
+
     // ===================== Helpers =====================
 
     function _seedOraclePortfolio() internal {
@@ -869,9 +958,9 @@ contract TiltProtocolTest is Test {
 
         vm.deal(curator, 1 ether);
         vm.startPrank(curator);
-        usdc.approve(address(factory), 1000e18);
+        usdc.approve(address(factory), 1000e6);
         vault = factory.createUserVault{value: 0.01 ether}(
-            "Tech Growth", "vTECH", tokens, weights, 5000, 1000e18, "ipfs://tech"
+            "Tech Growth", "vTECH", tokens, weights, 5000, 1000e6, "ipfs://tech"
         );
         vm.stopPrank();
     }

@@ -47,7 +47,7 @@ contract DeployTiltProtocol is Script {
 
         vm.startBroadcast(deployerPrivateKey);
 
-        // ========== 1. Deploy TiltUSDC (18 decimals, with faucet) ==========
+        // ========== 1. Deploy TiltUSDC (6 decimals, with faucet) ==========
         TiltUSDC _tiltUsdc = new TiltUSDC();
         tiltUsdc = address(_tiltUsdc);
         console.log("TiltUSDC:", tiltUsdc);
@@ -129,13 +129,13 @@ contract DeployTiltProtocol is Script {
         // ========== 7. Seed Liquidity ==========
 
         // Mint tiltUSDC to deployer for vault seeding
-        _tiltUsdc.mint(deployer, 1_000_000e18); // 1M tiltUSDC
+        _tiltUsdc.mint(deployer, 1_000_000e6); // 1M tiltUSDC
 
         // Mint stock tokens to router for swap reserves
-        _tokenFactory.mintAllTokens(router, 1_000_000e18); // 1M of each stock
+        _tokenFactory.mintAllTokens(router, 1_000_000e18); // 1M of each stock (18 dec)
 
         // Mint tiltUSDC to router for swap reserves
-        _tiltUsdc.mint(router, 10_000_000e18); // 10M tiltUSDC in router
+        _tiltUsdc.mint(router, 10_000_000e6); // 10M tiltUSDC in router
 
         // ========== 8. Register Politicians & Seed Portfolios ==========
 
@@ -154,7 +154,7 @@ contract DeployTiltProtocol is Script {
 
         // ========== 9. Create Politician Vaults (via factory, with dead shares) ==========
 
-        uint256 seedAmount = 1000e18; // 1,000 tiltUSDC seed per vault
+        uint256 seedAmount = 1000e6; // 1,000 tiltUSDC seed per vault
 
         // Approve factory to pull tiltUSDC for seeding
         _tiltUsdc.approve(factory, seedAmount * 3);

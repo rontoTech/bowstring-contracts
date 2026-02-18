@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ITokenRouter} from "../interfaces/ITokenRouter.sol";
@@ -95,7 +96,8 @@ contract MockTokenRouter is ITokenRouter, Ownable, ReentrancyGuard {
         emit Swap(tokenIn, tokenOut, amountIn, amountOut, recipient);
     }
 
-    /// @notice Get a price quote
+    /// @notice Get a price quote, normalizing for decimal differences between tokens.
+    ///         Prices are in 18-decimal USD. amountIn/amountOut are in each token's native decimals.
     function getQuote(address tokenIn, address tokenOut, uint256 amountIn)
         public
         view
@@ -108,8 +110,22 @@ contract MockTokenRouter is ITokenRouter, Ownable, ReentrancyGuard {
         if (priceIn == 0) revert ZeroPrice();
         if (priceOut == 0) revert ZeroPrice();
 
-        // amountOut = amountIn * priceIn / priceOut
-        amountOut = (amountIn * priceIn) / priceOut;
+        uint256 decIn = _decimals(tokenIn);
+        uint256 decOut = _decimals(tokenOut);
+
+        if (decIn >= decOut) {
+            amountOut = (amountIn * priceIn) / priceOut / (10 ** (decIn - decOut));
+        } else {
+            amountOut = (amountIn * priceIn) * (10 ** (decOut - decIn)) / priceOut;
+        }
+    }
+
+    function _decimals(address token) internal view returns (uint256) {
+        try ERC20(token).decimals() returns (uint8 d) {
+            return uint256(d);
+        } catch {
+            return 18;
+        }
     }
 
     function isPairSupported(address tokenIn, address tokenOut) external view override returns (bool) {

@@ -78,6 +78,24 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
         lastFeeAccrualTimestamp = block.timestamp;
     }
 
+    // ===================== ERC-20 Overrides =====================
+
+    /// @notice Vault share decimals match the base asset decimals.
+    ///         This ensures wallets, explorers, and frontends display correct values.
+    ///         Shares are minted 1:1 with asset amounts on the first deposit,
+    ///         so a 6-decimal base asset requires 6-decimal shares for proper display.
+    function decimals() public view override returns (uint8) {
+        return _safeDecimals(address(baseAsset));
+    }
+
+    function _safeDecimals(address token) internal view returns (uint8) {
+        try ERC20(token).decimals() returns (uint8 d) {
+            return d;
+        } catch {
+            return 18;
+        }
+    }
+
     // ===================== ERC-4626 Core =====================
 
     /// @notice Deposit base assets and receive vault shares
@@ -435,13 +453,15 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
             uint256 tokenVal = _tokenValueInBase(token);
             if (tokenVal == 0) continue;
 
-            // Proportional amount to sell from this token
-            uint256 sellValueBase = (deficit * tokenVal) / totalHeldValue;
+            // Proportional amount to sell from this token.
+            // Ceiling division ensures the sum of sells covers the full deficit
+            // despite integer rounding (critical for low-decimal base assets like 6-dec USDC).
+            uint256 sellValueBase = (deficit * tokenVal + totalHeldValue - 1) / totalHeldValue;
             if (sellValueBase == 0) continue;
 
-            // Convert base-asset-denominated value to token units
+            // Convert base-asset-denominated value to token units (ceil to avoid undershoot)
             uint256 tokenBal = IERC20(token).balanceOf(address(this));
-            uint256 sellAmount = (tokenBal * sellValueBase) / tokenVal;
+            uint256 sellAmount = (tokenBal * sellValueBase + tokenVal - 1) / tokenVal;
             if (sellAmount > tokenBal) sellAmount = tokenBal;
             if (sellAmount == 0) continue;
 
