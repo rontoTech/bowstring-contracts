@@ -6,7 +6,8 @@ import "forge-std/Test.sol";
 import {FeeManager} from "../src/core/FeeManager.sol";
 import {PoliticianVault} from "../src/core/PoliticianVault.sol";
 import {UserVault} from "../src/core/UserVault.sol";
-import {VaultFactory} from "../src/core/VaultFactory.sol";
+import {PoliticianVaultFactory} from "../src/core/PoliticianVaultFactory.sol";
+import {UserVaultFactory} from "../src/core/UserVaultFactory.sol";
 import {VaultRegistry} from "../src/core/VaultRegistry.sol";
 import {PortfolioOracle} from "../src/oracle/PortfolioOracle.sol";
 import {RebalanceEngine} from "../src/rebalance/RebalanceEngine.sol";
@@ -34,7 +35,8 @@ contract TiltProtocolTest is Test {
     PortfolioOracle public oracle;
     MockTokenRouter public router;
     RebalanceEngine public engine;
-    VaultFactory public factory;
+    PoliticianVaultFactory public pvFactory;
+    UserVaultFactory public uvFactory;
     MockStockTokenFactory public tokenFactory;
 
     // --- Mock stock tokens ---
@@ -64,19 +66,22 @@ contract TiltProtocolTest is Test {
         engine = new RebalanceEngine(address(router), address(usdc));
         tokenFactory = new MockStockTokenFactory();
 
-        // Deploy factory
-        factory = new VaultFactory(
+        // Deploy split factories
+        pvFactory = new PoliticianVaultFactory(
             address(usdc), address(feeManager), address(registry), address(engine), address(router), address(oracle)
+        );
+        uvFactory = new UserVaultFactory(
+            address(usdc), address(feeManager), address(registry), address(engine), address(router)
         );
 
         // Setup permissions
-        registry.setRegistrar(address(factory), true);
+        registry.setRegistrar(address(pvFactory), true);
+        registry.setRegistrar(address(uvFactory), true);
         registry.setRegistrar(deployer, true);
 
-        // FeeManager: deployer stays owner, factory is authorized caller
-        feeManager.setAuthorizedCaller(address(factory), true);
+        feeManager.setAuthorizedCaller(address(pvFactory), true);
+        feeManager.setAuthorizedCaller(address(uvFactory), true);
 
-        // Set all fees to 0 for test simplicity
         feeManager.setDefaultFees(0, 0, 0, 0);
 
         // Setup oracle
@@ -95,13 +100,14 @@ contract TiltProtocolTest is Test {
         router.setPairSupported(address(usdc), address(nvda), true);
         router.setAuthorizedCaller(address(engine), true);
 
-        // Engine: authorize factory to register vaults
-        engine.setAuthorizedCaller(address(factory), true);
+        // Engine: authorize both factories to register vaults
+        engine.setAuthorizedCaller(address(pvFactory), true);
+        engine.setAuthorizedCaller(address(uvFactory), true);
 
-        // Setup approved tokens in factory
-        factory.setApprovedToken(address(aapl), true);
-        factory.setApprovedToken(address(msft), true);
-        factory.setApprovedToken(address(nvda), true);
+        // Setup approved tokens in user vault factory
+        uvFactory.setApprovedToken(address(aapl), true);
+        uvFactory.setApprovedToken(address(msft), true);
+        uvFactory.setApprovedToken(address(nvda), true);
 
         // Fund test accounts
         usdc.mint(deployer, INITIAL_USDC);
@@ -211,15 +217,15 @@ contract TiltProtocolTest is Test {
         _seedOraclePortfolio();
 
         // Approve seed deposit
-        usdc.approve(address(factory), SEED_AMOUNT);
+        usdc.approve(address(pvFactory), SEED_AMOUNT);
 
-        address vault = factory.createPoliticianVault(
+        address vault = pvFactory.createPoliticianVault(
             PELOSI_ID, "Pelosi Tracker", "tiltPELOSI", address(0), "ipfs://pelosi", SEED_AMOUNT
         );
 
         assertTrue(vault != address(0));
-        assertTrue(factory.isVault(vault));
-        assertEq(factory.totalVaults(), 1);
+        assertTrue(pvFactory.isVault(vault));
+        assertEq(pvFactory.totalVaults(), 1);
         assertTrue(registry.isRegistered(vault));
 
         // Dead shares should exist at address(1)
@@ -229,17 +235,15 @@ contract TiltProtocolTest is Test {
     }
 
     function test_Factory_approvedTokenList_removal() public {
-        // Add a token
-        factory.setApprovedToken(address(0xBEEF), true);
-        address[] memory tokens = factory.getApprovedTokens();
+        uvFactory.setApprovedToken(address(0xBEEF), true);
+        address[] memory tokens = uvFactory.getApprovedTokens();
         uint256 lenBefore = tokens.length;
 
-        // Remove it
-        factory.setApprovedToken(address(0xBEEF), false);
-        tokens = factory.getApprovedTokens();
+        uvFactory.setApprovedToken(address(0xBEEF), false);
+        tokens = uvFactory.getApprovedTokens();
 
         assertEq(tokens.length, lenBefore - 1);
-        assertFalse(factory.approvedTokens(address(0xBEEF)));
+        assertFalse(uvFactory.approvedTokens(address(0xBEEF)));
     }
 
     // ===================== Politician Vault Tests =====================
@@ -329,7 +333,7 @@ contract TiltProtocolTest is Test {
     function test_UserVault_create() public {
         address vaultAddr = _createUserVault();
         assertTrue(vaultAddr != address(0));
-        assertTrue(factory.isVault(vaultAddr));
+        assertTrue(uvFactory.isVault(vaultAddr));
     }
 
     function test_UserVault_timelocked_setRebalanceEngine() public {
@@ -472,11 +476,10 @@ contract TiltProtocolTest is Test {
     // ===================== Engine Authorization Tests =====================
 
     function test_Engine_authorizedCallers() public {
-        // Factory should be authorized
-        assertTrue(engine.authorizedCallers(address(factory)));
+        assertTrue(engine.authorizedCallers(address(pvFactory)));
+        assertTrue(engine.authorizedCallers(address(uvFactory)));
 
-        // Factory can authorize a vault
-        vm.prank(address(factory));
+        vm.prank(address(pvFactory));
         engine.setVaultAuthorized(address(0xABCD), true);
         assertTrue(engine.authorizedVaults(address(0xABCD)));
     }
@@ -1110,8 +1113,8 @@ contract TiltProtocolTest is Test {
     function _createPoliticianVault() internal returns (address vault) {
         _seedOraclePortfolio();
 
-        usdc.approve(address(factory), SEED_AMOUNT);
-        vault = factory.createPoliticianVault(
+        usdc.approve(address(pvFactory), SEED_AMOUNT);
+        vault = pvFactory.createPoliticianVault(
             PELOSI_ID, "Pelosi Tracker", "tiltPELOSI", address(0), "ipfs://pelosi", SEED_AMOUNT
         );
     }
@@ -1127,8 +1130,8 @@ contract TiltProtocolTest is Test {
 
         vm.deal(curator, 1 ether);
         vm.startPrank(curator);
-        usdc.approve(address(factory), 1000e6);
-        vault = factory.createUserVault{value: 0.01 ether}(
+        usdc.approve(address(uvFactory), 1000e6);
+        vault = uvFactory.createUserVault{value: 0.01 ether}(
             "Tech Growth", "vTECH", tokens, weights, 5000, 1000e6, "ipfs://tech"
         );
         vm.stopPrank();

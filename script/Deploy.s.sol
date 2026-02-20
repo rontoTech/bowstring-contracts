@@ -5,7 +5,7 @@ import "forge-std/Script.sol";
 
 import {FeeManager} from "../src/core/FeeManager.sol";
 import {VaultRegistry} from "../src/core/VaultRegistry.sol";
-import {VaultFactory} from "../src/core/VaultFactory.sol";
+import {PoliticianVaultFactory} from "../src/core/PoliticianVaultFactory.sol";
 import {PoliticianVault} from "../src/core/PoliticianVault.sol";
 import {PortfolioOracle} from "../src/oracle/PortfolioOracle.sol";
 import {ChainlinkAdapter} from "../src/oracle/ChainlinkAdapter.sol";
@@ -28,7 +28,7 @@ contract DeployTiltProtocol is Script {
     address public chainlinkAdapter;
     address public router;
     address public engine;
-    address public factory;
+    address public pvFactory;
     address public tokenFactory;
 
     // Politician vault addresses
@@ -87,20 +87,21 @@ contract DeployTiltProtocol is Script {
         chainlinkAdapter = address(_adapter);
         console.log("ChainlinkAdapter:", chainlinkAdapter);
 
-        // ========== 4. Deploy VaultFactory ==========
+        // ========== 4. Deploy PoliticianVaultFactory ==========
 
-        VaultFactory _factory = new VaultFactory(tiltUsdc, feeManager, registry, engine, router, oracle);
-        factory = address(_factory);
-        console.log("VaultFactory:", factory);
+        PoliticianVaultFactory _pvFactory =
+            new PoliticianVaultFactory(tiltUsdc, feeManager, registry, engine, router, oracle);
+        pvFactory = address(_pvFactory);
+        console.log("PoliticianVaultFactory:", pvFactory);
 
         // ========== 5. Configure Permissions ==========
 
         // Registry: authorize factory and deployer as registrars
-        _registry.setRegistrar(factory, true);
+        _registry.setRegistrar(pvFactory, true);
         _registry.setRegistrar(deployer, true);
 
         // FeeManager: authorize factory as caller (deployer stays owner)
-        _feeManager.setAuthorizedCaller(factory, true);
+        _feeManager.setAuthorizedCaller(pvFactory, true);
 
         // Oracle: authorize adapter and deployer as reporters
         _oracle.setReporter(chainlinkAdapter, true);
@@ -110,7 +111,7 @@ contract DeployTiltProtocol is Script {
         _router.setAuthorizedCaller(engine, true);
 
         // Engine: authorize factory to register vaults
-        _engine.setAuthorizedCaller(factory, true);
+        _engine.setAuthorizedCaller(pvFactory, true);
 
         // ========== 6. Setup Token Prices in Router ==========
 
@@ -120,7 +121,6 @@ contract DeployTiltProtocol is Script {
         for (uint256 i = 0; i < tokens.length; i++) {
             _router.setTokenPrice(tokens[i].token, tokens[i].initialPrice);
             _router.setPairSupported(tiltUsdc, tokens[i].token, true);
-            _factory.setApprovedToken(tokens[i].token, true);
 
             console.log("Stock Token:", tokens[i].symbol);
             console.log("  Address:", tokens[i].token);
@@ -157,17 +157,17 @@ contract DeployTiltProtocol is Script {
         uint256 seedAmount = 1000e6; // 1,000 tiltUSDC seed per vault
 
         // Approve factory to pull tiltUSDC for seeding
-        _tiltUsdc.approve(factory, seedAmount * 3);
+        _tiltUsdc.approve(pvFactory, seedAmount * 3);
 
         // tiltPELOSI vault
-        pelosiVault = _factory.createPoliticianVault(
+        pelosiVault = _pvFactory.createPoliticianVault(
             pelosiId, "Tilt Pelosi Index", "tiltPELOSI", address(0), "ipfs://pelosi-vault", seedAmount
         );
         PoliticianVault(pelosiVault).setKeeper(deployer, true);
         console.log("tiltPELOSI Vault:", pelosiVault);
 
         // tiltTUBE vault
-        tubervilleVault = _factory.createPoliticianVault(
+        tubervilleVault = _pvFactory.createPoliticianVault(
             tubervilleId,
             "Tilt Tuberville Index",
             "tiltTUBE",
@@ -179,7 +179,7 @@ contract DeployTiltProtocol is Script {
         console.log("tiltTUBE Vault:", tubervilleVault);
 
         // tiltCREN vault
-        crenshawVault = _factory.createPoliticianVault(
+        crenshawVault = _pvFactory.createPoliticianVault(
             crenshawId, "Tilt Crenshaw Index", "tiltCREN", address(0), "ipfs://crenshaw-vault", seedAmount
         );
         PoliticianVault(crenshawVault).setKeeper(deployer, true);
@@ -199,7 +199,7 @@ contract DeployTiltProtocol is Script {
         console.log("ChainlinkAdapter:     ", chainlinkAdapter);
         console.log("MockTokenRouter:      ", router);
         console.log("RebalanceEngine:      ", engine);
-        console.log("VaultFactory:         ", factory);
+        console.log("PoliticianVaultFactory:", pvFactory);
         console.log("StockTokenFactory:    ", tokenFactory);
         console.log("");
         console.log("--- Politician Vaults ---");

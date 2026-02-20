@@ -1,0 +1,36 @@
+{
+  "network": "Robinhood Chain Testnet",
+  "chainId": 46630,
+  "rpcUrl": "https://rpc.testnet.chain.robinhood.com",
+  "explorer": "https://explorer.testnet.chain.robinhood.com",
+  "deployer": "0xd3f9Dcd6011E1aA13eEB277d9CE5F2f7c9BB6070",
+  "deployedAt": "2026-02-16",
+  "contracts": {
+    "TiltUSDC": "0x941A382852E989078e15b381f921C488a7Ca5299",
+    "MockStockTokenFactory": "0x26F1E4b0Fd4e7f0Bb69cC8274099C77f374a4EB8",
+    "FeeManager": "0x63D367C9A34d94aBD4D2cD0921Dd0F4252E8548A",
+    "VaultRegistry": "0x38485146d0D1E0c700ddBf61206188CFaC170795",
+    "PortfolioOracle": "0x1a105C43e70Dee39Fa33841d1846C2c2620c9DE4",
+    "MockTokenRouter": "0x18e66aA8C28cA21eEA724B75E01F56Cc3e293Ba8",
+    "RebalanceEngine": "0xAfe9CA99AB3CFa2523553E25743eA1463ae35eF2",
+    "ChainlinkAdapter": "0x2d747D538D1572630F7BA000EbB2A2b0DB498839",
+    "PoliticianVaultFactory": "0x2505fccc8CE6BAb9f3b4DF4671958CE5CB8154a9"
+  },
+  "stockTokens": {
+    "tiltAAPL": "0x62E15C761dEB77A2ad8feD3cdff4c0B80eF3cd7a",
+    "tiltMSFT": "0xef0fe767ad5aD88b78311Bc191675Af6F3a05921",
+    "tiltNVDA": "0xB9ab028505f3746c4E1208FD31f8db7733e2bb3A",
+    "tiltTSLA": "0xDc3E7C2b1b63970e544911359E39155B90244c69",
+    "tiltAMZN": "0x4c7edC7D43BA53cbb295B6A5fe3f9605016D8cD8",
+    "tiltGOOGL": "0x9478c4567924c780b89e127a53e9A9D7A61747b0",
+    "tiltMETA": "0x859AA35c0accd27b47092F2d8F8DE4879cd0d70f",
+    "tiltJPM": "0xA690410a34a81AB5Ef4D5AB4679bDf3181be4F5E",
+    "tiltV": "0xD25460d0cb2910aF95961b426c6950C98F8f8352",
+    "tiltJNJ": "0x1e15cC76339b7620D1bc8Ba8F9B577b71EECD599"
+  },
+  "politicianVaults": {
+    "tiltPELOSI": "0x28876DBa8457279fe2bcBC4f42584971eD1e088D",
+    "tiltTUBE": "0x14E85c178F5ccc95397539E2B5014ecd4763aA39",
+    "tiltCREN": "0x9B6216E54078a2b64B07d5B1f9bE389be4eFF636"
+  }
+}
