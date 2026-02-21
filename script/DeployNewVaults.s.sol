@@ -12,9 +12,9 @@ import {MockTokenRouter} from "../src/rebalance/TokenRouter.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /// @title DeployNewVaults
-/// @notice Deploys a new PoliticianVaultFactory (with updated BaseVault bytecode
-///         containing allocateIdleAssets + unallocatedDeposits) and creates all
-///         6 politician vaults. Reuses existing infrastructure.
+/// @notice Deploys a new PoliticianVaultFactory with Beacon Proxy architecture.
+///         Creates UpgradeableBeacon + implementation, then spawns all 6
+///         politician vaults as BeaconProxy instances. Reuses existing infrastructure.
 contract DeployNewVaults is Script {
     // Existing infrastructure on Robinhood L2 Testnet
     address constant TILT_USDC       = 0x941A382852E989078e15b381f921C488a7Ca5299;
@@ -45,6 +45,8 @@ contract DeployNewVaults is Script {
             TILT_USDC, FEE_MANAGER, VAULT_REGISTRY, ENGINE, ROUTER, ORACLE
         );
         console.log("New PoliticianVaultFactory:", address(factory));
+        console.log("  Beacon:", address(factory.beacon()));
+        console.log("  Implementation:", factory.implementation());
 
         // ========== 2. Configure permissions for new factory ==========
         VaultRegistry(VAULT_REGISTRY).setRegistrar(address(factory), true);
@@ -108,15 +110,17 @@ contract DeployNewVaults is Script {
         vm.stopBroadcast();
 
         // ========== Summary ==========
-        console.log("\n============ NEW VAULT DEPLOYMENT ============");
+        console.log("\n============ BEACON PROXY DEPLOYMENT ============");
         console.log("PoliticianVaultFactory:", address(factory));
+        console.log("UpgradeableBeacon:     ", address(factory.beacon()));
+        console.log("Implementation:        ", factory.implementation());
         console.log("");
-        console.log("tiltPELOSI: ", pelosiVault);
-        console.log("tiltTUBE:   ", tubeVault);
-        console.log("tiltCREN:   ", crenVault);
-        console.log("tiltMCCAUL: ", mccaulVault);
-        console.log("tiltWYDEN:  ", wydenVault);
-        console.log("tiltSESS:   ", sessVault);
-        console.log("==============================================\n");
+        console.log("tiltPELOSI:  ", pelosiVault);
+        console.log("tiltTUBE:    ", tubeVault);
+        console.log("tiltCREN:    ", crenVault);
+        console.log("tiltMCCAUL:  ", mccaulVault);
+        console.log("tiltWYDEN:   ", wydenVault);
+        console.log("tiltSESS:    ", sessVault);
+        console.log("================================================\n");
     }
 }

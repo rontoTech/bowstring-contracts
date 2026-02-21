@@ -9,6 +9,8 @@ import {IBaseVault} from "../interfaces/IBaseVault.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {RebalanceEngine} from "../rebalance/RebalanceEngine.sol";
+import {UpgradeableBeacon} from "@openzeppelin/contracts/proxy/beacon/UpgradeableBeacon.sol";
+import {BeaconProxy} from "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
 
 /// @title UserVaultFactory
 /// @notice Permissionless factory for creating UserVaults.
@@ -17,6 +19,8 @@ import {RebalanceEngine} from "../rebalance/RebalanceEngine.sol";
 ///         auto-register in VaultRegistry and authorize on RebalanceEngine.
 contract UserVaultFactory is Ownable {
     using SafeERC20 for IERC20;
+
+    UpgradeableBeacon public beacon;
 
     address public baseAsset;
     FeeManager public feeManager;
@@ -71,6 +75,9 @@ contract UserVaultFactory is Ownable {
         minSeedDeposit = 100e6;
         defaultTimeLock = 24 hours;
         defaultMinRebalanceInterval = 4 hours;
+
+        UserVault impl = new UserVault();
+        beacon = new UpgradeableBeacon(address(impl), address(this));
     }
 
     function setApprovedToken(address token, bool approved) external onlyOwner {
@@ -159,14 +166,17 @@ contract UserVaultFactory is Ownable {
             initialWeights[i] = IBaseVault.TokenWeight({token: tokens[i], weightBps: weights[i]});
         }
 
-        UserVault uVault = new UserVault(
-            name, symbol, baseAsset, address(feeManager),
-            rebalanceEngine, tokenRouter, msg.sender,
-            approvedTokenList, defaultTimeLock, defaultMinRebalanceInterval,
-            initialWeights
+        bytes memory initData = abi.encodeCall(
+            UserVault.initialize,
+            (name, symbol, baseAsset, address(feeManager),
+             rebalanceEngine, tokenRouter, msg.sender,
+             approvedTokenList, defaultTimeLock, defaultMinRebalanceInterval,
+             initialWeights)
         );
 
-        vault = address(uVault);
+        BeaconProxy proxy = new BeaconProxy(address(beacon), initData);
+        vault = address(proxy);
+
         allVaults.push(vault);
         isVault[vault] = true;
 
@@ -176,8 +186,8 @@ contract UserVaultFactory is Ownable {
 
         IERC20(baseAsset).safeTransferFrom(msg.sender, address(this), seedDeposit);
         IERC20(baseAsset).forceApprove(vault, seedDeposit);
-        uVault.deposit(DEAD_SHARE_AMOUNT, address(1));
-        uVault.deposit(seedDeposit - DEAD_SHARE_AMOUNT, msg.sender);
+        UserVault(vault).deposit(DEAD_SHARE_AMOUNT, address(1));
+        UserVault(vault).deposit(seedDeposit - DEAD_SHARE_AMOUNT, msg.sender);
         IERC20(baseAsset).forceApprove(vault, 0);
 
         if (vaultCreationFee > 0) {
@@ -192,6 +202,14 @@ contract UserVaultFactory is Ownable {
         }
 
         emit UserVaultCreated(vault, msg.sender, name, symbol);
+    }
+
+    function upgradeImplementation(address newImplementation) external onlyOwner {
+        beacon.upgradeTo(newImplementation);
+    }
+
+    function implementation() external view returns (address) {
+        return beacon.implementation();
     }
 
     function setCreationFee(uint256 _fee) external onlyOwner {

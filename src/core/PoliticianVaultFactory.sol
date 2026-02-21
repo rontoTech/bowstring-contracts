@@ -9,13 +9,17 @@ import {IBaseVault} from "../interfaces/IBaseVault.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {RebalanceEngine} from "../rebalance/RebalanceEngine.sol";
+import {UpgradeableBeacon} from "@openzeppelin/contracts/proxy/beacon/UpgradeableBeacon.sol";
+import {BeaconProxy} from "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
 
 /// @title PoliticianVaultFactory
-/// @notice Permissioned factory for creating PoliticianVaults.
-///         Vaults receive donation attack protection via dead shares,
-///         are auto-registered in VaultRegistry and authorized on RebalanceEngine.
+/// @notice Permissioned factory for creating PoliticianVaults behind BeaconProxy.
+///         All vaults share a single implementation via UpgradeableBeacon.
+///         Upgrading the beacon upgrades every vault atomically in one tx.
 contract PoliticianVaultFactory is Ownable {
     using SafeERC20 for IERC20;
+
+    UpgradeableBeacon public beacon;
 
     address public baseAsset;
     FeeManager public feeManager;
@@ -34,6 +38,7 @@ contract PoliticianVaultFactory is Ownable {
     event DefaultOracleUpdated(address indexed oracle);
     event RebalanceEngineUpdated(address indexed engine);
     event MinSeedDepositUpdated(uint256 newMin);
+    event ImplementationUpgraded(address indexed newImplementation);
 
     constructor(
         address _baseAsset,
@@ -48,6 +53,7 @@ contract PoliticianVaultFactory is Ownable {
         require(_registry != address(0), "PVF: zero registry");
         require(_rebalanceEngine != address(0), "PVF: zero engine");
         require(_tokenRouter != address(0), "PVF: zero router");
+
         baseAsset = _baseAsset;
         feeManager = FeeManager(payable(_feeManager));
         registry = VaultRegistry(_registry);
@@ -55,6 +61,9 @@ contract PoliticianVaultFactory is Ownable {
         tokenRouter = _tokenRouter;
         defaultOracle = _defaultOracle;
         minSeedDeposit = 100e6;
+
+        PoliticianVault impl = new PoliticianVault();
+        beacon = new UpgradeableBeacon(address(impl), address(this));
     }
 
     function createPoliticianVault(
@@ -70,12 +79,15 @@ contract PoliticianVaultFactory is Ownable {
         address oracleAddr = oracle != address(0) ? oracle : defaultOracle;
         require(oracleAddr != address(0), "PVF: no oracle");
 
-        PoliticianVault pVault = new PoliticianVault(
-            name, symbol, politicianId, baseAsset, oracleAddr,
-            address(feeManager), rebalanceEngine, tokenRouter, msg.sender
+        bytes memory initData = abi.encodeCall(
+            PoliticianVault.initialize,
+            (name, symbol, politicianId, baseAsset, oracleAddr,
+             address(feeManager), rebalanceEngine, tokenRouter, msg.sender)
         );
 
-        vault = address(pVault);
+        BeaconProxy proxy = new BeaconProxy(address(beacon), initData);
+        vault = address(proxy);
+
         allVaults.push(vault);
         isVault[vault] = true;
 
@@ -85,11 +97,20 @@ contract PoliticianVaultFactory is Ownable {
 
         IERC20(baseAsset).safeTransferFrom(msg.sender, address(this), seedDeposit);
         IERC20(baseAsset).forceApprove(vault, seedDeposit);
-        pVault.deposit(DEAD_SHARE_AMOUNT, address(1));
-        pVault.deposit(seedDeposit - DEAD_SHARE_AMOUNT, msg.sender);
+        PoliticianVault(vault).deposit(DEAD_SHARE_AMOUNT, address(1));
+        PoliticianVault(vault).deposit(seedDeposit - DEAD_SHARE_AMOUNT, msg.sender);
         IERC20(baseAsset).forceApprove(vault, 0);
 
         emit PoliticianVaultCreated(vault, politicianId, name, symbol);
+    }
+
+    function upgradeImplementation(address newImplementation) external onlyOwner {
+        beacon.upgradeTo(newImplementation);
+        emit ImplementationUpgraded(newImplementation);
+    }
+
+    function implementation() external view returns (address) {
+        return beacon.implementation();
     }
 
     function setDefaultOracle(address _oracle) external onlyOwner {

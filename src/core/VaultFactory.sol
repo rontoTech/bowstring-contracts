@@ -10,6 +10,8 @@ import {IBaseVault} from "../interfaces/IBaseVault.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {RebalanceEngine} from "../rebalance/RebalanceEngine.sol";
+import {UpgradeableBeacon} from "@openzeppelin/contracts/proxy/beacon/UpgradeableBeacon.sol";
+import {BeaconProxy} from "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
 
 /// @title VaultFactory
 /// @notice Factory for creating PoliticianVaults (permissioned) and UserVaults (permissionless).
@@ -17,6 +19,9 @@ import {RebalanceEngine} from "../rebalance/RebalanceEngine.sol";
 ///         Vaults are auto-registered in VaultRegistry and authorized on RebalanceEngine.
 contract VaultFactory is Ownable {
     using SafeERC20 for IERC20;
+
+    UpgradeableBeacon public politicianBeacon;
+    UpgradeableBeacon public userBeacon;
 
     // --- Immutables / Config ---
     address public baseAsset; // tiltUSDC or main deposit token
@@ -86,6 +91,12 @@ contract VaultFactory is Ownable {
         minSeedDeposit = 100e6; // 100 tiltUSDC (6 decimals)
         defaultTimeLock = 24 hours;
         defaultMinRebalanceInterval = 4 hours;
+
+        PoliticianVault pImpl = new PoliticianVault();
+        politicianBeacon = new UpgradeableBeacon(address(pImpl), address(this));
+
+        UserVault uImpl = new UserVault();
+        userBeacon = new UpgradeableBeacon(address(uImpl), address(this));
     }
 
     // ===================== Admin =====================
@@ -191,31 +202,24 @@ contract VaultFactory is Ownable {
         address oracleAddr = oracle != address(0) ? oracle : defaultOracle;
         require(oracleAddr != address(0), "VaultFactory: no oracle");
 
-        PoliticianVault pVault = new PoliticianVault(
-            name, symbol, politicianId, baseAsset, oracleAddr,
-            address(feeManager), rebalanceEngine, tokenRouter, msg.sender
+        bytes memory initData = abi.encodeCall(
+            PoliticianVault.initialize,
+            (name, symbol, politicianId, baseAsset, oracleAddr,
+             address(feeManager), rebalanceEngine, tokenRouter, msg.sender)
         );
 
-        vault = address(pVault);
+        BeaconProxy proxy = new BeaconProxy(address(politicianBeacon), initData);
+        vault = address(proxy);
         _registerVault(vault);
 
-        // Configure fees: 0% curator share for politician vaults
         feeManager.configureVaultFees(vault, 0, address(0));
-
-        // Register in registry
         registry.registerVault(vault, VaultRegistry.VaultType.POLITICIAN, address(0), metadataURI);
-
-        // Authorize vault on rebalance engine
         RebalanceEngine(rebalanceEngine).setVaultAuthorized(vault, true);
 
-        // Seed deposit with dead shares (donation attack protection)
         IERC20(baseAsset).safeTransferFrom(msg.sender, address(this), seedDeposit);
         IERC20(baseAsset).forceApprove(vault, seedDeposit);
-
-        pVault.deposit(DEAD_SHARE_AMOUNT, address(1));
-        pVault.deposit(seedDeposit - DEAD_SHARE_AMOUNT, msg.sender);
-
-        // Reset approval after seeding
+        PoliticianVault(vault).deposit(DEAD_SHARE_AMOUNT, address(1));
+        PoliticianVault(vault).deposit(seedDeposit - DEAD_SHARE_AMOUNT, msg.sender);
         IERC20(baseAsset).forceApprove(vault, 0);
 
         emit PoliticianVaultCreated(vault, politicianId, name, symbol);
@@ -265,50 +269,33 @@ contract VaultFactory is Ownable {
             initialWeights[i] = IBaseVault.TokenWeight({token: tokens[i], weightBps: weights[i]});
         }
 
-        // Create vault with initial weights set in constructor
-        UserVault uVault = new UserVault(
-            name,
-            symbol,
-            baseAsset,
-            address(feeManager),
-            rebalanceEngine,
-            tokenRouter,
-            msg.sender, // curator
-            approvedTokenList,
-            defaultTimeLock,
-            defaultMinRebalanceInterval,
-            initialWeights
+        bytes memory initData = abi.encodeCall(
+            UserVault.initialize,
+            (name, symbol, baseAsset, address(feeManager),
+             rebalanceEngine, tokenRouter, msg.sender,
+             approvedTokenList, defaultTimeLock, defaultMinRebalanceInterval,
+             initialWeights)
         );
 
-        vault = address(uVault);
+        BeaconProxy proxy = new BeaconProxy(address(userBeacon), initData);
+        vault = address(proxy);
         _registerVault(vault);
 
-        // Configure fees with curator split
         feeManager.configureVaultFees(vault, curatorFeeBps, msg.sender);
-
-        // Register in registry
         registry.registerVault(vault, VaultRegistry.VaultType.USER, msg.sender, metadataURI);
-
-        // Authorize vault on rebalance engine
         RebalanceEngine(rebalanceEngine).setVaultAuthorized(vault, true);
 
-        // Seed deposit with dead shares (donation attack protection)
         IERC20(baseAsset).safeTransferFrom(msg.sender, address(this), seedDeposit);
         IERC20(baseAsset).forceApprove(vault, seedDeposit);
-
-        uVault.deposit(DEAD_SHARE_AMOUNT, address(1));
-        uVault.deposit(seedDeposit - DEAD_SHARE_AMOUNT, msg.sender);
-
-        // Reset approval after seeding
+        UserVault(vault).deposit(DEAD_SHARE_AMOUNT, address(1));
+        UserVault(vault).deposit(seedDeposit - DEAD_SHARE_AMOUNT, msg.sender);
         IERC20(baseAsset).forceApprove(vault, 0);
 
-        // Forward creation fee to protocol treasury
         if (vaultCreationFee > 0) {
             (bool success,) = feeManager.protocolTreasury().call{value: vaultCreationFee}("");
             require(success, "VaultFactory: fee transfer failed");
         }
 
-        // Refund excess ETH to sender
         uint256 excess = msg.value - vaultCreationFee;
         if (excess > 0) {
             (bool refundSuccess,) = payable(msg.sender).call{value: excess}("");

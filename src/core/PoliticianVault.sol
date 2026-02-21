@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {BaseVault} from "./BaseVault.sol";
 import {IBaseVault} from "../interfaces/IBaseVault.sol";
@@ -14,9 +14,9 @@ import {ITokenRouter} from "../interfaces/ITokenRouter.sol";
 ///         Target weights are sourced from PortfolioOracle (Chainlink-fed).
 ///         Only admin or Chainlink Automation can trigger rebalances.
 ///         Includes emergency pause capability.
-contract PoliticianVault is BaseVault, Ownable {
+contract PoliticianVault is BaseVault, OwnableUpgradeable {
     // --- State ---
-    bytes32 public immutable politicianId;
+    bytes32 public politicianId;
     IPortfolioOracle public oracle;
 
     // --- Access control ---
@@ -48,7 +48,12 @@ contract PoliticianVault is BaseVault, Ownable {
     error NoPendingChange();
     error TimeLockNotExpired();
 
-    constructor(
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    function initialize(
         string memory _name,
         string memory _symbol,
         bytes32 _politicianId,
@@ -58,14 +63,14 @@ contract PoliticianVault is BaseVault, Ownable {
         address _rebalanceEngine,
         address _tokenRouter,
         address _owner
-    )
-        BaseVault(_name, _symbol, _baseAsset, _feeManager, _rebalanceEngine, _tokenRouter)
-        Ownable(_owner)
-    {
+    ) external initializer {
+        __BaseVault_init(_name, _symbol, _baseAsset, _feeManager, _rebalanceEngine, _tokenRouter);
+        __Ownable_init(_owner);
+
         require(_oracle != address(0), "PoliticianVault: zero oracle");
         politicianId = _politicianId;
         oracle = IPortfolioOracle(_oracle);
-        highWaterMark = 1e18; // initial share price
+        highWaterMark = 1e18;
     }
 
     // ===================== Admin =====================
@@ -209,4 +214,6 @@ contract PoliticianVault is BaseVault, Ownable {
     function _getTargetWeights() internal view override returns (IBaseVault.TokenWeight[] memory) {
         return oracle.getPortfolio(politicianId);
     }
+
+    uint256[50] private __gap;
 }

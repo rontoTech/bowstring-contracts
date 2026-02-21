@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {ERC20Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {IERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IBaseVault} from "../interfaces/IBaseVault.sol";
 import {IRebalanceEngine} from "../interfaces/IRebalanceEngine.sol";
@@ -19,13 +21,13 @@ import {FeeManager} from "./FeeManager.sol";
 ///         Uses the TokenRouter as a price oracle for accurate NAV calculation.
 ///         Management/performance fees collected via share dilution to fee recipients.
 ///         Sub-classes override _getTargetWeights() to source allocations.
-abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
+abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard, PausableUpgradeable {
     using SafeERC20 for IERC20;
     using Math for uint256;
 
     // --- Core ---
     IERC20 public baseAsset; // deposit/withdraw token (tiltUSDC) — mutable by admin
-    FeeManager public immutable feeManager;
+    FeeManager public feeManager;
     IRebalanceEngine public rebalanceEngine;
     ITokenRouter public tokenRouter; // price oracle + swap router
 
@@ -64,14 +66,17 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
     error DepositTooSmall();
     error OracleDegraded(); // deposits blocked when a held token has zero oracle price
 
-    constructor(
+    function __BaseVault_init(
         string memory _name,
         string memory _symbol,
         address _baseAsset,
         address _feeManager,
         address _rebalanceEngine,
         address _tokenRouter
-    ) ERC20(_name, _symbol) {
+    ) internal onlyInitializing {
+        __ERC20_init(_name, _symbol);
+        __Pausable_init();
+
         require(_baseAsset != address(0), "BaseVault: zero base asset");
         require(_feeManager != address(0), "BaseVault: zero fee manager");
 
@@ -93,7 +98,7 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
     }
 
     function _safeDecimals(address token) internal view returns (uint8) {
-        try ERC20(token).decimals() returns (uint8 d) {
+        try IERC20Metadata(token).decimals() returns (uint8 d) {
             return d;
         } catch {
             return 18;
@@ -411,34 +416,48 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
 
     // ===================== Idle Allocation =====================
 
-    /// @notice Allocate unallocated deposit inflows into the target portfolio proportionally.
-    ///         Open to anyone — depositors can immediately put funds to work
+    /// @notice Deposit and immediately allocate into the target portfolio in one tx.
+    ///         Open to anyone — the depositor pays gas for the allocation swaps.
+    function depositAndAllocate(uint256 assets, address receiver)
+        external
+        nonReentrant
+        whenNotPaused
+        returns (uint256 shares)
+    {
+        shares = _deposit(assets, receiver);
+        _allocateUnallocated();
+    }
+
+    /// @notice Allocate unallocated deposit inflows into the target portfolio.
+    ///         Open to anyone — depositors can put queued funds to work
     ///         without waiting for a keeper-triggered rebalance.
-    ///         Only buys into target weights; never sells existing positions.
-    ///         Only touches deposit inflows tracked by `unallocatedDeposits`,
-    ///         so intentional cash positions held by the fund manager are never disturbed.
     function allocateIdleAssets() external nonReentrant whenNotPaused {
         if (_hasZeroPriceToken()) revert OracleDegraded();
+        _allocateUnallocated();
+    }
 
-        require(unallocatedDeposits > 0, "BaseVault: no unallocated deposits");
-        require(address(rebalanceEngine) != address(0), "BaseVault: no rebalance engine");
-        require(address(tokenRouter) != address(0), "BaseVault: no token router");
+    /// @dev Core allocation logic: buys into target weights proportionally
+    ///      using only `unallocatedDeposits`. Never sells existing positions,
+    ///      never touches intentional cash held by the fund manager.
+    function _allocateUnallocated() internal {
+        if (unallocatedDeposits == 0) return;
+        if (address(rebalanceEngine) == address(0)) return;
+        if (address(tokenRouter) == address(0)) return;
 
-        // Cap by actual base balance (withdrawals may have consumed some)
         uint256 actualBase = baseAsset.balanceOf(address(this));
         uint256 allocatable = unallocatedDeposits < actualBase ? unallocatedDeposits : actualBase;
-        require(allocatable > 0, "BaseVault: no allocatable assets");
-
-        unallocatedDeposits -= allocatable;
+        if (allocatable == 0) return;
 
         IBaseVault.TokenWeight[] memory targetWeights = _getTargetWeights();
-        require(targetWeights.length > 0, "BaseVault: no target weights");
+        if (targetWeights.length == 0) return;
 
         uint256 totalTargetBps = 0;
         for (uint256 i = 0; i < targetWeights.length; i++) {
             totalTargetBps += targetWeights[i].weightBps;
         }
-        require(totalTargetBps > 0, "BaseVault: zero target weights");
+        if (totalTargetBps == 0) return;
+
+        unallocatedDeposits -= allocatable;
 
         baseAsset.forceApprove(address(rebalanceEngine), allocatable);
 
@@ -516,7 +535,7 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
 
     /// @dev Get decimals for a token, defaults to 18 if the call fails
     function _tokenDecimals(address token) internal view returns (uint256) {
-        try ERC20(token).decimals() returns (uint8 d) {
+        try IERC20Metadata(token).decimals() returns (uint8 d) {
             return uint256(d);
         } catch {
             return 18;
@@ -776,4 +795,6 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
     function setWithdrawalSlippage(uint256 _slippageBps) external virtual;
     function pause() external virtual;
     function unpause() external virtual;
+
+    uint256[50] private __gap;
 }

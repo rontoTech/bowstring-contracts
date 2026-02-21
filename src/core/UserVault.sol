@@ -69,7 +69,12 @@ contract UserVault is BaseVault {
         _;
     }
 
-    constructor(
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    function initialize(
         string memory _name,
         string memory _symbol,
         address _baseAsset,
@@ -81,20 +86,20 @@ contract UserVault is BaseVault {
         uint256 _timeLock,
         uint256 _minRebalanceInterval,
         IBaseVault.TokenWeight[] memory _initialWeights
-    ) BaseVault(_name, _symbol, _baseAsset, _feeManager, _rebalanceEngine, _tokenRouter) {
+    ) external initializer {
+        __BaseVault_init(_name, _symbol, _baseAsset, _feeManager, _rebalanceEngine, _tokenRouter);
+
         require(_curator != address(0), "UserVault: zero curator");
         curator = _curator;
         weightChangeTimeLock = _timeLock;
         minRebalanceInterval = _minRebalanceInterval;
         highWaterMark = 1e18;
 
-        // Initialize approved tokens
         for (uint256 i = 0; i < _approvedTokens.length; i++) {
             approvedTokens[_approvedTokens[i]] = true;
             approvedTokenList.push(_approvedTokens[i]);
         }
 
-        // Set initial target weights (validated by factory before passing)
         if (_initialWeights.length > 0) {
             uint256 totalBps = 0;
             for (uint256 i = 0; i < _initialWeights.length; i++) {
