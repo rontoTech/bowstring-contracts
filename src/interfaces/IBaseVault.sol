@@ -28,6 +28,10 @@ interface IBaseVault is IERC4626 {
     /// @notice Trigger a rebalance to match target weights
     function rebalance() external;
 
+    /// @notice Allocate idle base assets into the portfolio proportionally.
+    ///         Open to anyone — depositors can immediately put funds to work.
+    function allocateIdleAssets() external;
+
     /// @notice Get the current target weights for the vault
     function getTargetWeights() external view returns (TokenWeight[] memory);
 

@@ -40,10 +40,14 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
     // --- Slippage ---
     uint256 public withdrawalSlippageBps = 100; // 1% default
 
+    // --- Allocation tracking ---
+    uint256 public unallocatedDeposits; // net deposit inflow not yet allocated into the portfolio
+
     // --- Events ---
     event Deposited(address indexed depositor, uint256 assets, uint256 shares);
     event Withdrawn(address indexed withdrawer, uint256 assets, uint256 shares);
     event RebalanceTriggered(uint256 timestamp);
+    event IdleAssetsAllocated(uint256 baseAllocated, uint256 tradeCount, uint256 timestamp);
     event BaseAssetUpdated(address indexed oldAsset, address indexed newAsset);
     event FeeSharesMinted(uint256 feeShares, address indexed recipient);
     event WithdrawalSlippageUpdated(uint256 newSlippageBps);
@@ -170,6 +174,8 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
         }
 
         _mint(receiver, shares);
+
+        unallocatedDeposits += netAssets;
 
         emit Deposited(receiver, assets, shares);
     }
@@ -394,10 +400,85 @@ abstract contract BaseVault is ERC20, ReentrancyGuard, Pausable {
             }
         }
 
+        // Keeper-triggered rebalance handles all assets including new deposits
+        unallocatedDeposits = 0;
+
         // Update held tokens tracking — preserves tokens with non-zero balances
         _updateHeldTokens(targetWeights);
 
         emit RebalanceTriggered(block.timestamp);
+    }
+
+    // ===================== Idle Allocation =====================
+
+    /// @notice Allocate unallocated deposit inflows into the target portfolio proportionally.
+    ///         Open to anyone — depositors can immediately put funds to work
+    ///         without waiting for a keeper-triggered rebalance.
+    ///         Only buys into target weights; never sells existing positions.
+    ///         Only touches deposit inflows tracked by `unallocatedDeposits`,
+    ///         so intentional cash positions held by the fund manager are never disturbed.
+    function allocateIdleAssets() external nonReentrant whenNotPaused {
+        if (_hasZeroPriceToken()) revert OracleDegraded();
+
+        require(unallocatedDeposits > 0, "BaseVault: no unallocated deposits");
+        require(address(rebalanceEngine) != address(0), "BaseVault: no rebalance engine");
+        require(address(tokenRouter) != address(0), "BaseVault: no token router");
+
+        // Cap by actual base balance (withdrawals may have consumed some)
+        uint256 actualBase = baseAsset.balanceOf(address(this));
+        uint256 allocatable = unallocatedDeposits < actualBase ? unallocatedDeposits : actualBase;
+        require(allocatable > 0, "BaseVault: no allocatable assets");
+
+        unallocatedDeposits -= allocatable;
+
+        IBaseVault.TokenWeight[] memory targetWeights = _getTargetWeights();
+        require(targetWeights.length > 0, "BaseVault: no target weights");
+
+        uint256 totalTargetBps = 0;
+        for (uint256 i = 0; i < targetWeights.length; i++) {
+            totalTargetBps += targetWeights[i].weightBps;
+        }
+        require(totalTargetBps > 0, "BaseVault: zero target weights");
+
+        baseAsset.forceApprove(address(rebalanceEngine), allocatable);
+
+        IRebalanceEngine.TradeOrder[] memory trades =
+            new IRebalanceEngine.TradeOrder[](targetWeights.length);
+        uint256 tradeCount = 0;
+
+        for (uint256 i = 0; i < targetWeights.length; i++) {
+            if (targetWeights[i].weightBps == 0) continue;
+
+            uint256 buyAmount = (allocatable * targetWeights[i].weightBps) / totalTargetBps;
+            if (buyAmount == 0) continue;
+
+            uint256 expectedOut = tokenRouter.getQuote(
+                address(baseAsset), targetWeights[i].token, buyAmount
+            );
+            uint256 minOut = (expectedOut * (10000 - withdrawalSlippageBps)) / 10000;
+
+            trades[tradeCount] = IRebalanceEngine.TradeOrder({
+                tokenIn: address(baseAsset),
+                tokenOut: targetWeights[i].token,
+                amountIn: buyAmount,
+                minAmountOut: minOut
+            });
+            tradeCount++;
+        }
+
+        if (tradeCount > 0) {
+            IRebalanceEngine.TradeOrder[] memory finalTrades =
+                new IRebalanceEngine.TradeOrder[](tradeCount);
+            for (uint256 i = 0; i < tradeCount; i++) {
+                finalTrades[i] = trades[i];
+            }
+            rebalanceEngine.executeRebalance(address(this), finalTrades);
+        }
+
+        baseAsset.forceApprove(address(rebalanceEngine), 0);
+        _updateHeldTokens(targetWeights);
+
+        emit IdleAssetsAllocated(allocatable, tradeCount, block.timestamp);
     }
 
     // ===================== Price Oracle / NAV =====================
