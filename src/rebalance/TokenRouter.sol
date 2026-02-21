@@ -3,8 +3,8 @@ pragma solidity ^0.8.24;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ITokenRouter} from "../interfaces/ITokenRouter.sol";
 
@@ -23,6 +23,10 @@ contract MockTokenRouter is ITokenRouter, Ownable, ReentrancyGuard {
 
     // --- Authorized callers (RebalanceEngine) ---
     mapping(address => bool) public authorizedCallers;
+
+    // --- Decimal overrides (for tokens whose decimals() doesn't work via try-catch) ---
+    mapping(address => uint8) public decimalOverride;
+    mapping(address => bool) public hasDecimalOverride;
 
     // --- Events ---
     event PriceUpdated(address indexed token, uint256 price);
@@ -69,6 +73,11 @@ contract MockTokenRouter is ITokenRouter, Ownable, ReentrancyGuard {
     function setAuthorizedCaller(address caller, bool authorized) external onlyOwner {
         authorizedCallers[caller] = authorized;
         emit CallerAuthorized(caller, authorized);
+    }
+
+    function setDecimalOverride(address token, uint8 dec) external onlyOwner {
+        decimalOverride[token] = dec;
+        hasDecimalOverride[token] = true;
     }
 
     // ===================== ITokenRouter =====================
@@ -121,7 +130,8 @@ contract MockTokenRouter is ITokenRouter, Ownable, ReentrancyGuard {
     }
 
     function _decimals(address token) internal view returns (uint256) {
-        try ERC20(token).decimals() returns (uint8 d) {
+        if (hasDecimalOverride[token]) return uint256(decimalOverride[token]);
+        try IERC20Metadata(token).decimals() returns (uint8 d) {
             return uint256(d);
         } catch {
             return 18;
