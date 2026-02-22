@@ -1,6 +1,6 @@
 # Tilt Protocol — Smart Contracts
 
-On-chain vault infrastructure for [tilt.finance](https://tilt.finance). ERC-4626 vaults that mirror politician stock portfolios with automated rebalancing, fee management, and permissionless vault creation.
+On-chain vault infrastructure for [tiltprotocol.com](https://www.tiltprotocol.com/). ERC-4626 vaults that mirror politician stock portfolios with automated rebalancing, fee management, and permissionless vault creation.
 
 > **Status**: Testnet — deployed on Robinhood L2 (Arbitrum Orbit, Chain ID 46630).
 
