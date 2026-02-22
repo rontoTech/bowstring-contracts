@@ -1,6 +1,6 @@
-# Bowstring Protocol — Smart Contracts
+# Tilt Protocol — Smart Contracts
 
-On-chain vault infrastructure for [bowstring.finance](https://bowstring.finance). ERC-4626 vaults that mirror politician stock portfolios with automated rebalancing, fee management, and permissionless vault creation.
+On-chain vault infrastructure for [tilt.finance](https://tilt.finance). ERC-4626 vaults that mirror politician stock portfolios with automated rebalancing, fee management, and permissionless vault creation.
 
 > **Status**: Testnet — deployed on Robinhood L2 (Arbitrum Orbit, Chain ID 46630).
 
@@ -26,7 +26,7 @@ On-chain vault infrastructure for [bowstring.finance](https://bowstring.finance)
 
 ## Overview
 
-Bowstring is a vault protocol that lets anyone invest in portfolios that track the stock trades of U.S. politicians. Public disclosure filings are ingested off-chain, written to an on-chain oracle, and vaults automatically rebalance to match the latest positions.
+Tilt is a vault protocol that lets anyone invest in portfolios that track the stock trades of U.S. politicians. Public disclosure filings are ingested off-chain, written to an on-chain oracle, and vaults automatically rebalance to match the latest positions.
 
 The protocol supports two vault types:
 
@@ -297,7 +297,7 @@ forge script script/Deploy.s.sol \
 ```bash
 # Clone and install dependencies
 git clone <repo-url>
-cd bowstring-contracts
+cd tilt-contracts
 forge install
 
 # Compile
