@@ -155,7 +155,7 @@ contract UserVaultFactory is Ownable {
             }
             totalBps += weights[i];
         }
-        if (totalBps != 10000) revert InvalidWeights();
+        if (totalBps == 0 || totalBps > 10000) revert InvalidWeights();
 
         require(
             curatorFeeBps <= 10000 - feeManager.MIN_PROTOCOL_SHARE_BPS(), "UVF: curator fee too high"

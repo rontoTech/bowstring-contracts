@@ -107,7 +107,7 @@ contract UserVault is BaseVault {
                 totalBps += _initialWeights[i].weightBps;
                 _targetWeights.push(_initialWeights[i]);
             }
-            require(totalBps == 10000, "UserVault: weights must sum to 10000");
+            require(totalBps > 0 && totalBps <= 10000, "UserVault: weights must sum to 1-10000");
         }
     }
 
@@ -368,7 +368,7 @@ contract UserVault is BaseVault {
             }
             totalBps += weights[i].weightBps;
         }
-        if (totalBps != 10000) revert InvalidWeights();
+        if (totalBps == 0 || totalBps > 10000) revert InvalidWeights();
     }
 
     function getApprovedTokens() external view returns (address[] memory) {

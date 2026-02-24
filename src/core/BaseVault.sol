@@ -468,7 +468,7 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
         for (uint256 i = 0; i < targetWeights.length; i++) {
             if (targetWeights[i].weightBps == 0) continue;
 
-            uint256 buyAmount = (allocatable * targetWeights[i].weightBps) / totalTargetBps;
+            uint256 buyAmount = (allocatable * targetWeights[i].weightBps) / 10000;
             if (buyAmount == 0) continue;
 
             uint256 expectedOut = tokenRouter.getQuote(
