@@ -44,6 +44,7 @@ contract VaultRegistry is Ownable {
     // --- Events ---
     event VaultRegistered(address indexed vault, VaultType vaultType, address indexed curator);
     event VaultDeactivated(address indexed vault);
+    event VaultMetadataUpdated(address indexed vault, string metadataURI);
     event CuratorProfileUpdated(address indexed curator, string metadataURI);
     event RegistrarUpdated(address indexed registrar, bool authorized);
 
@@ -111,6 +112,15 @@ contract VaultRegistry is Ownable {
         if (!isRegistered[vault]) revert NotRegistered();
         allVaults[vaultIndex[vault]].active = false;
         emit VaultDeactivated(vault);
+    }
+
+    /// @notice Update vault metadata (callable by curator or owner)
+    function updateVaultMetadata(address vault, string calldata metadataURI) external {
+        if (!isRegistered[vault]) revert NotRegistered();
+        VaultInfo storage info = allVaults[vaultIndex[vault]];
+        if (msg.sender != info.curator && msg.sender != owner()) revert NotCurator();
+        info.metadataURI = metadataURI;
+        emit VaultMetadataUpdated(vault, metadataURI);
     }
 
     // ===================== Curator Profiles =====================

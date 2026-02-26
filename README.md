@@ -1,6 +1,6 @@
 # Tilt Protocol — Smart Contracts
 
-On-chain vault infrastructure for [tiltprotocol.com](https://www.tiltprotocol.com/). ERC-4626 vaults that mirror politician stock portfolios with automated rebalancing, fee management, and permissionless vault creation.
+On-chain vault infrastructure for [tiltprotocol.com](https://www.tiltprotocol.com/). ERC-4626 vaults that enable anyone to create and manage decentralized hedge funds with automated rebalancing, fee management, and permissionless vault creation.
 
 > **Status**: Testnet — deployed on Robinhood L2 (Arbitrum Orbit, Chain ID 46630).
 
@@ -26,18 +26,11 @@ On-chain vault infrastructure for [tiltprotocol.com](https://www.tiltprotocol.co
 
 ## Overview
 
-Tilt is a vault protocol that lets anyone invest in portfolios that track the stock trades of U.S. politicians. Public disclosure filings are ingested off-chain, written to an on-chain oracle, and vaults automatically rebalance to match the latest positions.
+Tilt Protocol is an Operating System for Decentralized Hedge Funds. Anyone can create a fund, define a portfolio strategy, and accept deposits — all on-chain. The protocol is designed so that AI developers can set up trading strategies in seconds, while retail investors gain direct exposure to these strategies.
 
-The protocol supports two vault types:
+All vaults use a unified **UserVault** architecture: an ERC-4626 vault that holds a basket of ERC-20 stock tokens denominated in a single base asset (tiltUSDC). A curator (the fund manager) controls target portfolio weights with a time-lock governance mechanism. Deposits mint shares proportional to NAV; withdrawals burn shares and auto-liquidate held tokens to return the base asset.
 
-| | Politician Vault | User Vault |
-|---|---|---|
-| **Weight source** | `PortfolioOracle` (Chainlink-fed) | Curator-managed |
-| **Creation** | Permissioned (protocol owner) | Permissionless (anyone with seed deposit) |
-| **Rebalancing** | Automatic via Chainlink Keepers | Curator-triggered with time-lock |
-| **Fee split** | 100% protocol | Configurable curator share (up to 80%) |
-
-All vaults share the same base: an abstract ERC-4626 vault that holds a basket of ERC-20 stock tokens denominated in a single base asset (tiltUSDC). Deposits mint shares proportional to NAV; withdrawals burn shares and auto-liquidate held tokens to return the base asset.
+Flagship vaults — such as politician stock-tracking indices — are simply UserVaults managed by the Tilt Protocol address, with rich metadata stored on-chain via `metadataURI`.
 
 ---
 
@@ -50,22 +43,21 @@ All vaults share the same base: an abstract ERC-4626 vault that holds a basket o
            │ deposit / withdraw / create      │ read state
            ▼                                  ▼
 ┌─────────────────────┐          ┌──────────────────────────┐
-│   VaultFactory(s)   │          │     VaultRegistry        │
-│  Politician / User  │          │   on-chain discovery     │
+│  UserVaultFactory   │          │     VaultRegistry        │
+│ (permissionless)    │          │   on-chain discovery     │
 └────────┬────────────┘          └──────────────────────────┘
          │ deploys (BeaconProxy)
          ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                     BaseVault (ERC-4626)                     │
-│  ┌─────────────────┐  ┌──────────────────┐                  │
-│  │ PoliticianVault │  │    UserVault      │                  │
-│  │ (oracle-driven) │  │ (curator-managed) │                  │
-│  └────────┬────────┘  └────────┬─────────┘                  │
-│           │ getTargetWeights() │                             │
-│           ▼                    ▼                             │
-│  ┌─────────────────┐  ┌──────────────────┐                  │
-│  │ PortfolioOracle │  │ Internal weights │                  │
-│  └─────────────────┘  └──────────────────┘                  │
+│  ┌─────────────────────────────────────────┐                │
+│  │            UserVault                     │                │
+│  │   curator-managed, time-locked weights   │                │
+│  └────────────────────┬────────────────────┘                │
+│                       │ getTargetWeights()                  │
+│                       ▼                                     │
+│               Internal weights                              │
+│               (curator-set, time-locked)                    │
 └───────────────────────────┬─────────────────────────────────┘
                             │ rebalance / allocate
                             ▼
@@ -76,15 +68,15 @@ All vaults share the same base: an abstract ERC-4626 vault that holds a basket o
                             │ swap
                             ▼
                  ┌─────────────────────┐
-                 │    TokenRouter      │
-                 │  price oracle +     │
-                 │  swap execution     │
-                 └─────────────────────┘
-
-        ┌──────────────┐    ┌───────────────────┐
-        │  FeeManager  │    │ ChainlinkAdapter  │
-        │  fee splits  │    │ oracle automation │
-        └──────────────┘    └───────────────────┘
+                 │    TokenRouter      │     ┌──────────────┐
+                 │  price oracle +     │     │ PriceOracle  │
+                 │  swap execution     │────▶│ ticker-based │
+                 └─────────────────────┘     │ price lookup │
+                                             └──────────────┘
+                 ┌──────────────┐
+                 │  FeeManager  │
+                 │  fee splits  │
+                 └──────────────┘
 ```
 
 ### Directory Layout
@@ -93,32 +85,26 @@ All vaults share the same base: an abstract ERC-4626 vault that holds a basket o
 src/
 ├── core/
 │   ├── BaseVault.sol              Abstract ERC-4626 vault base
-│   ├── PoliticianVault.sol        Oracle-driven politician tracker
 │   ├── UserVault.sol              Curator-managed permissionless vault
-│   ├── PoliticianVaultFactory.sol BeaconProxy factory (permissioned)
 │   ├── UserVaultFactory.sol       BeaconProxy factory (permissionless)
-│   ├── VaultFactory.sol           Legacy CREATE2 + EIP-1167 factory
-│   ├── VaultRegistry.sol          On-chain vault discovery
+│   ├── VaultRegistry.sol          On-chain vault discovery + metadata
 │   └── FeeManager.sol             Protocol + curator fee splits
 ├── interfaces/
 │   ├── IBaseVault.sol
-│   ├── IPortfolioOracle.sol
 │   ├── IRebalanceEngine.sol
 │   └── ITokenRouter.sol
 ├── oracle/
-│   ├── PortfolioOracle.sol        Stores politician portfolio weights
-│   └── ChainlinkAdapter.sol       Chainlink Functions + Automation bridge
+│   └── PriceOracle.sol            Ticker-based price lookups via TokenRouter
 ├── rebalance/
 │   ├── RebalanceEngine.sol        Trade calculation and execution
 │   └── TokenRouter.sol            Mock DEX router (testnet swap + oracle)
-└── tokens/
-    └── MockStockToken.sol         Mock ERC-20 stock tokens (testnet)
+├── tokens/
+│   └── MockStockToken.sol         Mock ERC-20 stock tokens (testnet)
+└── deprecated/                    Legacy contracts (PoliticianVault, etc.)
 
 script/
 ├── Deploy.s.sol                   Full protocol deployment
-├── DeployNewVaults.s.sol          Deploy new vaults with BeaconProxy
-├── UpgradeEngine.s.sol            Upgrade RebalanceEngine
-└── UpgradeFactory.s.sol           Upgrade VaultFactory
+└── deprecated/                    Legacy deployment scripts
 
 test/
 └── TiltProtocolTest.t.sol         Protocol integration tests
@@ -142,13 +128,7 @@ Abstract base for all vaults. Implements ERC-4626 deposit/withdraw semantics wit
 - **Allocation**: `allocateIdleAssets()` buys target portfolio tokens using unallocated base asset. Permissionless — anyone can call it.
 - **Rebalancing**: `rebalance()` sells over-weight tokens and buys under-weight tokens to match target allocations.
 - **Dead Shares**: First 1,000 shares are minted to `address(1)` to prevent inflation attacks.
-
-#### `PoliticianVault`
-
-Extends `BaseVault`. Target weights are sourced from `PortfolioOracle`. When the oracle publishes updated politician filings, the vault's target weights update automatically and rebalancing brings holdings in line.
-
-- Rebalancing is restricted to the `rebalanceEngine` or vault owner.
-- Configurable `minRebalanceInterval` prevents excessive rebalancing.
+- **Emergency Withdraw**: `emergencyWithdraw()` returns pro-rata share of all held tokens directly — works even when oracle is down or vault is paused.
 
 #### `UserVault`
 
@@ -157,14 +137,8 @@ Extends `BaseVault`. A curator (the vault creator) manages target weights direct
 - **Weight Changes**: Curator proposes new weights → time-lock delay → weights become effective. Prevents rug-pulls.
 - **Approved Tokens**: Only tokens from a factory-managed allowlist can be held.
 - **Curator Fees**: Curator earns a configurable share of management and performance fees.
-
-#### `PoliticianVaultFactory`
-
-Deploys `PoliticianVault` instances as `BeaconProxy` clones. Owner-only. Automatically:
-- Registers vaults in `VaultRegistry`
-- Configures fees via `FeeManager`
-- Authorizes vaults on `RebalanceEngine`
-- Seeds initial liquidity with dead shares
+- **Config Time-locks**: Critical changes (rebalance engine, token router, base asset) are time-locked to protect depositors.
+- **Emergency Unpause**: Both curator and protocol admin can unpause, preventing permanent fund lock if the curator disappears.
 
 #### `UserVaultFactory`
 
@@ -173,10 +147,14 @@ Deploys `UserVault` instances as `BeaconProxy` clones. Permissionless — anyone
 - Enforces minimum seed deposit and token allowlist.
 - Curator fee capped so protocol retains minimum share.
 - Registers vaults in `VaultRegistry` and authorizes on `RebalanceEngine`.
+- Seeds dead shares to `address(1)` for donation attack protection.
 
 #### `VaultRegistry`
 
-On-chain directory of all deployed vaults. Stores vault type (politician/user), creator address, metadata URI, and active status. Supports enumeration for frontend discovery.
+On-chain directory of all deployed vaults. Stores vault type, curator address, metadata URI, and active status. Supports enumeration for frontend discovery and curator-indexed lookups.
+
+- `updateVaultMetadata()` allows curators or the protocol owner to update vault metadata post-deployment.
+- `updateCuratorProfile()` allows curators to set their own profile metadata.
 
 #### `FeeManager`
 
@@ -197,19 +175,14 @@ Entry/exit fees are collected in the base asset. Management/performance fees are
 | Interface | Purpose |
 |---|---|
 | `IBaseVault` | Vault lifecycle: `TokenWeight` struct, config getters |
-| `IPortfolioOracle` | `getPortfolio(politicianId)` → token/weight arrays |
 | `IRebalanceEngine` | `calculateRebalance()`, `executeRebalance()`, `TradeOrder` struct |
 | `ITokenRouter` | `swap()`, `getQuote()`, `getTokenPrice()`, pair support |
 
 ### Oracle
 
-#### `PortfolioOracle`
+#### `PriceOracle`
 
-Stores politician portfolio allocations as `(token, weightBps)` arrays. Updated by authorized reporters (backend service via Chainlink or direct write). Each update is timestamped for freshness checks.
-
-#### `ChainlinkAdapter`
-
-Bridges Chainlink Functions (off-chain API calls for filing data) and Chainlink Automation (periodic triggers) to the `PortfolioOracle`. Handles request/response lifecycle and error recovery.
+Provides a ticker-symbol-based interface for reading token prices from the `TokenRouter`. Maps human-readable ticker symbols (e.g., "AAPL") to token addresses for convenient off-chain integration.
 
 ### Rebalance
 
@@ -264,12 +237,11 @@ Current deployment addresses are in [`deployments/robinhood-testnet.json`](./dep
 | TiltUSDC | `0x941A382852E989078e15b381f921C488a7Ca5299` |
 | FeeManager | `0x63D367C9A34d94aBD4D2cD0921Dd0F4252E8548A` |
 | VaultRegistry | `0x38485146d0D1E0c700ddBf61206188CFaC170795` |
-| PortfolioOracle | `0x1a105C43e70Dee39Fa33841d1846C2c2620c9DE4` |
-| MockTokenRouter | `0x18e66aA8C28cA21eEA724B75E01F56Cc3e293Ba8` |
+| MockTokenRouter | `0x969F9C8Dc7361C8ac4f94cEb0B3c609F6b05dA72` |
 | RebalanceEngine | `0xAfe9CA99AB3CFa2523553E25743eA1463ae35eF2` |
-| PoliticianVaultFactory | `0x2505fccc8CE6BAb9f3b4DF4671958CE5CB8154a9` |
+| UserVaultFactory | `0x67f0C4C9E5804186b049bAFBd69671228e9BCC09` |
 
-Plus 6 politician vaults, 1 user vault factory, and 100+ mock stock tokens.
+Plus 100+ mock stock tokens deployed via `MockStockTokenFactory`.
 
 ### Deploy from scratch
 
@@ -295,7 +267,6 @@ forge script script/Deploy.s.sol \
 ### Setup
 
 ```bash
-# Clone and install dependencies
 git clone <repo-url>
 cd tilt-contracts
 forge install
@@ -316,7 +287,7 @@ forge test --gas-report
 |---|---|
 | Framework | Foundry |
 | Solidity | 0.8.24 (optimizer: 200 runs, via-ir) |
-| Dependencies | OpenZeppelin Contracts v5, Chainlink |
+| Dependencies | OpenZeppelin Contracts v5 |
 | Target Chain | Robinhood L2 (Arbitrum Orbit, Chain ID 46630) |
 | Proxy Pattern | UpgradeableBeacon + BeaconProxy |
 
@@ -329,21 +300,25 @@ forge test --gas-report
 | Role | Capabilities |
 |---|---|
 | Protocol Owner | Deploy factories, configure fees, pause vaults, upgrade beacons |
-| Curator (UserVault) | Propose weight changes, trigger rebalance |
+| Curator (UserVault) | Propose weight changes, trigger rebalance, pause/unpause |
 | Vault Factory | Deploy vaults, authorize on engine, configure fees |
 | RebalanceEngine | Execute trades on behalf of vaults |
-| Anyone | Deposit, withdraw (never paused), call `allocateIdleAssets()` |
+| Anyone | Deposit, withdraw (never paused), call `allocateIdleAssets()`, `emergencyWithdraw()` |
 
 ### Safety Mechanisms
 
 - **Reentrancy guards** on all state-changing vault operations.
 - **Dead shares** (1,000 shares to `address(1)`) prevent first-depositor inflation attacks.
 - **Withdrawal never paused** — users can always exit regardless of vault state.
-- **Time-lock on weight changes** in UserVault prevents curator rug-pulls.
+- **Emergency withdraw** — returns pro-rata tokens directly, works even with broken oracle.
+- **Time-lock on weight changes** prevents curator rug-pulls.
+- **Time-lock on critical config** (engine, router, base asset) protects depositors.
+- **Emergency unpause** — protocol admin can unpause if curator disappears.
 - **Slippage protection** on all swaps with configurable tolerance.
 - **Token count cap** (30 max held tokens) prevents gas DoS on enumeration.
 - **High-water mark** prevents performance fee double-charging after drawdowns.
 - **Ceiling-division rounding** on withdrawals protects the vault from rounding exploits.
+- **One-time fee configuration** — vault fees cannot be reconfigured after initial setup.
 
 ---
 
