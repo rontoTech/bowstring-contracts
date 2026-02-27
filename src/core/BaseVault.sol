@@ -378,11 +378,10 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
         uint256 totalValue = _totalAssets();
 
         if (address(rebalanceEngine) != address(0) && totalValue > 0) {
-            // Set exact approvals for rebalance engine (forceApprove avoids stale allowance buildup)
-            uint256 baseBalance = baseAsset.balanceOf(address(this));
-            if (baseBalance > 0) {
-                baseAsset.forceApprove(address(rebalanceEngine), baseBalance);
-            }
+            // Approve max for duration of rebalance: sell trades return base to
+            // the vault, and subsequent buy trades pull it back out. The needed
+            // amount isn't known upfront, so we approve max and reset to 0 after.
+            baseAsset.forceApprove(address(rebalanceEngine), type(uint256).max);
             for (uint256 i = 0; i < heldTokens.length; i++) {
                 uint256 bal = IERC20(heldTokens[i]).balanceOf(address(this));
                 if (bal > 0) {
