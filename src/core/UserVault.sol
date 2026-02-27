@@ -156,10 +156,15 @@ contract UserVault is BaseVault {
 
     // ===================== Time-locked Config Changes =====================
 
-    /// @notice Propose a new rebalance engine (time-locked)
-    function setRebalanceEngine(address _engine) external override onlyCurator {
+    /// @notice Propose a new rebalance engine (time-locked for curators,
+    ///         immediate for protocol admin to allow infrastructure upgrades).
+    function setRebalanceEngine(address _engine) external override {
+        bool isCurator = msg.sender == curator;
+        bool isProtocolAdmin = msg.sender == feeManager.owner();
+        if (!isCurator && !isProtocolAdmin) revert OnlyCurator();
+
         require(_engine != address(0), "UserVault: zero engine");
-        if (weightChangeTimeLock == 0) {
+        if (weightChangeTimeLock == 0 || isProtocolAdmin) {
             rebalanceEngine = IRebalanceEngine(_engine);
             emit ConfigChangeApplied("rebalanceEngine", _engine);
         } else {
@@ -181,10 +186,15 @@ contract UserVault is BaseVault {
         emit ConfigChangeApplied("rebalanceEngine", pendingRebalanceEngine.value);
     }
 
-    /// @notice Propose a new token router (time-locked)
-    function setTokenRouter(address _router) external override onlyCurator {
+    /// @notice Propose a new token router (time-locked for curators,
+    ///         immediate for protocol admin).
+    function setTokenRouter(address _router) external override {
+        bool isCurator = msg.sender == curator;
+        bool isProtocolAdmin = msg.sender == feeManager.owner();
+        if (!isCurator && !isProtocolAdmin) revert OnlyCurator();
+
         require(_router != address(0), "UserVault: zero router");
-        if (weightChangeTimeLock == 0) {
+        if (weightChangeTimeLock == 0 || isProtocolAdmin) {
             tokenRouter = ITokenRouter(_router);
             emit ConfigChangeApplied("tokenRouter", _router);
         } else {

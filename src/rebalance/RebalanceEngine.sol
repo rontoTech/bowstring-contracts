@@ -122,8 +122,19 @@ contract RebalanceEngine is IRebalanceEngine, Ownable {
             ? (totalValue * (10000 - totalCurrentBps)) / 10000
             : 0;
 
-        // Total budget for buying = sell proceeds + unallocated base asset
-        uint256 availableForBuys = availableBaseFromSells + unallocatedBase;
+        // Total budget for buying = sell proceeds + unallocated base asset.
+        // Budget haircut: two sources of error cause buy amounts to exceed
+        // actual available base:
+        //   1. Round-trip price rounding: sell value is estimated via
+        //      getQuote(base→token), but execution does token→base which
+        //      rounds differently. Accumulates across all sell trades.
+        //   2. uint16 weight truncation: getCurrentWeights() truncates BPS to
+        //      uint16, making totalCurrentBps < reality, which inflates the
+        //      computed unallocatedBase above the actual USDC balance.
+        // A 2% haircut on the total buy budget absorbs both error sources.
+        uint256 rawBudget = availableBaseFromSells + unallocatedBase;
+        uint256 haircut = (rawBudget * 200) / 10000; // 2%
+        uint256 availableForBuys = rawBudget - haircut;
 
         // First pass: compute total deficit BPS across all underweight tokens
         uint256 totalDeficitBps = 0;
