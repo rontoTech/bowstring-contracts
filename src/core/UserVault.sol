@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {BaseVault} from "./BaseVault.sol";
+import {FeeManager} from "./FeeManager.sol";
 import {IBaseVault} from "../interfaces/IBaseVault.sol";
 import {IRebalanceEngine} from "../interfaces/IRebalanceEngine.sol";
 import {ITokenRouter} from "../interfaces/ITokenRouter.sol";
@@ -155,6 +156,13 @@ contract UserVault is BaseVault {
     }
 
     // ===================== Time-locked Config Changes =====================
+
+    /// @notice Update the FeeManager reference. Protocol admin only.
+    function setFeeManager(address _feeManager) external override {
+        require(msg.sender == feeManager.owner(), "UserVault: only protocol admin");
+        require(_feeManager != address(0), "UserVault: zero fee manager");
+        feeManager = FeeManager(payable(_feeManager));
+    }
 
     /// @notice Propose a new rebalance engine (time-locked for curators,
     ///         immediate for protocol admin to allow infrastructure upgrades).

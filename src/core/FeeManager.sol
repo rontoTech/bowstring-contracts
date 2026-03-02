@@ -16,7 +16,7 @@ contract FeeManager is Ownable {
     // --- Constants ---
     uint16 public constant MAX_ENTRY_FEE_BPS = 100; // 1%
     uint16 public constant MAX_EXIT_FEE_BPS = 200; // 2%
-    uint16 public constant MAX_MANAGEMENT_FEE_BPS = 200; // 2%
+    uint16 public constant MAX_MANAGEMENT_FEE_BPS = 500; // 5%
     uint16 public constant MAX_PERFORMANCE_FEE_BPS = 3000; // 30%
     uint16 public constant MIN_PROTOCOL_SHARE_BPS = 2000; // 20% minimum protocol cut
     uint16 public constant BPS_DENOMINATOR = 10000;
@@ -132,6 +132,58 @@ contract FeeManager is Ownable {
             curator: curator,
             isConfigured: true
         });
+
+        emit VaultFeeConfigured(vault, vaultFees[vault]);
+    }
+
+    /// @notice Configure vault with custom management and performance fee rates.
+    ///         Called by the factory so curators can set their own fee schedule.
+    function configureVaultFeesWithRates(
+        address vault,
+        uint16 mgmtFeeBps,
+        uint16 perfFeeBps,
+        uint16 curatorShareBps,
+        address curator
+    ) external onlyAuthorized {
+        require(!vaultFees[vault].isConfigured, "FeeManager: vault fees already configured");
+        require(mgmtFeeBps <= MAX_MANAGEMENT_FEE_BPS, "FeeManager: mgmt fee too high");
+        require(perfFeeBps <= MAX_PERFORMANCE_FEE_BPS, "FeeManager: perf fee too high");
+        require(
+            curatorShareBps <= BPS_DENOMINATOR - MIN_PROTOCOL_SHARE_BPS, "FeeManager: curator share too high"
+        );
+
+        vaultFees[vault] = VaultFeeConfig({
+            entryFeeBps: defaultEntryFeeBps,
+            exitFeeBps: defaultExitFeeBps,
+            managementFeeBps: mgmtFeeBps,
+            performanceFeeBps: perfFeeBps,
+            curatorShareBps: curatorShareBps,
+            curator: curator,
+            isConfigured: true
+        });
+
+        emit VaultFeeConfigured(vault, vaultFees[vault]);
+    }
+
+    /// @notice Owner-only: update fee rates for an already-configured vault.
+    ///         Used to fix misconfigured vaults or apply protocol-wide rate changes.
+    function updateVaultFees(
+        address vault,
+        uint16 entryBps,
+        uint16 exitBps,
+        uint16 mgmtBps,
+        uint16 perfBps
+    ) external onlyOwner {
+        require(vaultFees[vault].isConfigured, "FeeManager: vault not configured");
+        require(entryBps <= MAX_ENTRY_FEE_BPS, "FeeManager: entry fee too high");
+        require(exitBps <= MAX_EXIT_FEE_BPS, "FeeManager: exit fee too high");
+        require(mgmtBps <= MAX_MANAGEMENT_FEE_BPS, "FeeManager: mgmt fee too high");
+        require(perfBps <= MAX_PERFORMANCE_FEE_BPS, "FeeManager: perf fee too high");
+
+        vaultFees[vault].entryFeeBps = entryBps;
+        vaultFees[vault].exitFeeBps = exitBps;
+        vaultFees[vault].managementFeeBps = mgmtBps;
+        vaultFees[vault].performanceFeeBps = perfBps;
 
         emit VaultFeeConfigured(vault, vaultFees[vault]);
     }

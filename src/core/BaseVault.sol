@@ -788,6 +788,7 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
     function _getTargetWeights() internal view virtual returns (IBaseVault.TokenWeight[] memory);
 
     // --- Abstract admin functions (access control in subclasses) ---
+    function setFeeManager(address _feeManager) external virtual;
     function setRebalanceEngine(address _engine) external virtual;
     function setTokenRouter(address _router) external virtual;
     function setBaseAsset(address _baseAsset) external virtual;

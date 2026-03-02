@@ -141,6 +141,34 @@ contract UserVaultFactory is Ownable {
         uint256 seedDeposit,
         string calldata metadataURI
     ) external payable returns (address vault) {
+        return _createVault(name, symbol, tokens, weights, 0, 0, curatorFeeBps, seedDeposit, metadataURI);
+    }
+
+    function createUserVaultWithFees(
+        string calldata name,
+        string calldata symbol,
+        address[] calldata tokens,
+        uint16[] calldata weights,
+        uint16 managementFeeBps,
+        uint16 performanceFeeBps,
+        uint16 curatorFeeBps,
+        uint256 seedDeposit,
+        string calldata metadataURI
+    ) external payable returns (address vault) {
+        return _createVault(name, symbol, tokens, weights, managementFeeBps, performanceFeeBps, curatorFeeBps, seedDeposit, metadataURI);
+    }
+
+    function _createVault(
+        string calldata name,
+        string calldata symbol,
+        address[] calldata tokens,
+        uint16[] calldata weights,
+        uint16 managementFeeBps,
+        uint16 performanceFeeBps,
+        uint16 curatorFeeBps,
+        uint256 seedDeposit,
+        string calldata metadataURI
+    ) internal returns (address vault) {
         if (msg.value < vaultCreationFee) revert InsufficientCreationFee();
         if (seedDeposit < minSeedDeposit) revert InsufficientSeedDeposit();
 
@@ -180,7 +208,11 @@ contract UserVaultFactory is Ownable {
         allVaults.push(vault);
         isVault[vault] = true;
 
-        feeManager.configureVaultFees(vault, curatorFeeBps, msg.sender);
+        if (managementFeeBps > 0 || performanceFeeBps > 0) {
+            feeManager.configureVaultFeesWithRates(vault, managementFeeBps, performanceFeeBps, curatorFeeBps, msg.sender);
+        } else {
+            feeManager.configureVaultFees(vault, curatorFeeBps, msg.sender);
+        }
         registry.registerVault(vault, VaultRegistry.VaultType.USER, msg.sender, metadataURI);
         RebalanceEngine(rebalanceEngine).setVaultAuthorized(vault, true);
 
