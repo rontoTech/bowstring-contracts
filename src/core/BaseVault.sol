@@ -385,7 +385,7 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
             for (uint256 i = 0; i < heldTokens.length; i++) {
                 uint256 bal = IERC20(heldTokens[i]).balanceOf(address(this));
                 if (bal > 0) {
-                    IERC20(heldTokens[i]).forceApprove(address(rebalanceEngine), bal);
+                    IERC20(heldTokens[i]).forceApprove(address(rebalanceEngine), type(uint256).max);
                 }
             }
 
