@@ -103,6 +103,9 @@ contract RebalanceEngine is IRebalanceEngine, Ownable {
                     availableBaseFromSells += sellValueBase;
                     uint256 sellAmountTokens =
                         tokenRouter.getQuote(baseAsset, currentWeights[i].token, sellValueBase);
+                    // Cap to actual vault balance — quote rounding can overshoot
+                    uint256 vaultBal = IERC20(currentWeights[i].token).balanceOf(vault);
+                    if (sellAmountTokens > vaultBal) sellAmountTokens = vaultBal;
                     uint256 minOut = (sellValueBase * (10000 - maxSlippageBps)) / 10000;
                     tempTrades[tradeCount] = TradeOrder({
                         tokenIn: currentWeights[i].token,
