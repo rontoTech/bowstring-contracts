@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {BaseVault} from "./BaseVault.sol";
 import {FeeManager} from "./FeeManager.sol";
 import {IBaseVault} from "../interfaces/IBaseVault.sol";
@@ -14,6 +15,7 @@ import {ITokenRouter} from "../interfaces/ITokenRouter.sol";
 ///         Critical config changes (engine, router, base asset) are time-locked
 ///         to protect depositors from curator rug pulls.
 contract UserVault is BaseVault {
+    using SafeERC20 for IERC20;
     // --- State ---
     address public curator;
     IBaseVault.TokenWeight[] private _targetWeights;
@@ -119,6 +121,22 @@ contract UserVault is BaseVault {
         address prev = curator;
         curator = newCurator;
         emit CuratorTransferred(prev, newCurator);
+    }
+
+    /// @notice Update the weight change time lock. Curator or protocol admin.
+    function setWeightChangeTimeLock(uint256 _timeLock) external {
+        bool isCurator = msg.sender == curator;
+        bool isProtocolAdmin = msg.sender == feeManager.owner();
+        if (!isCurator && !isProtocolAdmin) revert OnlyCurator();
+        weightChangeTimeLock = _timeLock;
+    }
+
+    /// @notice Update the minimum rebalance interval. Curator or protocol admin.
+    function setMinRebalanceInterval(uint256 _interval) external {
+        bool isCurator = msg.sender == curator;
+        bool isProtocolAdmin = msg.sender == feeManager.owner();
+        if (!isCurator && !isProtocolAdmin) revert OnlyCurator();
+        minRebalanceInterval = _interval;
     }
 
     // ===================== Weight Management =====================
@@ -312,6 +330,52 @@ contract UserVault is BaseVault {
         withdrawalSlippageBps = pendingWithdrawalSlippage.value;
         pendingWithdrawalSlippage.pending = false;
         emit WithdrawalSlippageUpdated(pendingWithdrawalSlippage.value);
+    }
+
+    // ===================== Single Trade =====================
+
+    /// @notice Execute a single buy or sell without full portfolio rebalance.
+    ///         Curator specifies the exact trade; target weights are synced afterward
+    ///         so future rebalances won't undo the trade.
+    function executeTrade(
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 minAmountOut
+    ) external onlyCurator nonReentrant whenNotPaused {
+        require(address(rebalanceEngine) != address(0), "UserVault: no engine");
+        require(amountIn > 0, "UserVault: zero amount");
+
+        _accrueManagementFee();
+
+        IERC20(tokenIn).forceApprove(address(rebalanceEngine), type(uint256).max);
+
+        IRebalanceEngine.TradeOrder[] memory trades = new IRebalanceEngine.TradeOrder[](1);
+        trades[0] = IRebalanceEngine.TradeOrder({
+            tokenIn: tokenIn,
+            tokenOut: tokenOut,
+            amountIn: amountIn,
+            minAmountOut: minAmountOut
+        });
+
+        rebalanceEngine.executeRebalance(address(this), trades);
+
+        IERC20(tokenIn).forceApprove(address(rebalanceEngine), 0);
+
+        // Add bought token to held tokens tracking if new
+        if (tokenOut != address(baseAsset) && !isHeldToken[tokenOut]) {
+            heldTokens.push(tokenOut);
+            isHeldToken[tokenOut] = true;
+        }
+
+        // Sync target weights to actual portfolio so rebalance() won't undo this trade
+        IBaseVault.TokenWeight[] memory current = this.getCurrentWeights();
+        delete _targetWeights;
+        for (uint256 i = 0; i < current.length; i++) {
+            if (current[i].weightBps > 0) {
+                _targetWeights.push(current[i]);
+            }
+        }
     }
 
     // ===================== Rebalance =====================
