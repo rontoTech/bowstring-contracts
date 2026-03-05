@@ -149,13 +149,16 @@ contract MigrateVaults is Script {
             uint256 balance = IERC20(oldToken).balanceOf(vaultAddr);
             if (balance == 0) continue;
 
-            string memory symbol;
+            string memory rawSymbol;
             try StockTokenUpgradeable(oldToken).symbol() returns (string memory s) {
-                symbol = s;
+                rawSymbol = s;
             } catch {
                 console.log("  SKIP: cannot read symbol for", oldToken);
                 continue;
             }
+
+            // Strip "tilt" prefix if present (old tokens use "tiltAAPL", new use "AAPL")
+            string memory symbol = _stripTiltPrefix(rawSymbol);
 
             address newToken = factory.tokenBySymbol(symbol);
             if (newToken == address(0)) {
@@ -169,7 +172,7 @@ contract MigrateVaults is Script {
                 console.log("  Deployed new token:", symbol, newToken);
             }
 
-            StockTokenUpgradeable(newToken).mint(vaultAddr, balance);
+            factory.mintToken(symbol, vaultAddr, balance);
             console.log("  Minted", balance, symbol, "to vault");
 
             IUserVault(vaultAddr).migrateToken(oldToken, newToken);
@@ -180,5 +183,17 @@ contract MigrateVaults is Script {
         IUserVault(vaultAddr).setTokenRouter(newRouter);
         IUserVault(vaultAddr).setFeeManager(newFeeManager);
         console.log("  Updated engine/router/feeManager");
+    }
+
+    function _stripTiltPrefix(string memory s) internal pure returns (string memory) {
+        bytes memory b = bytes(s);
+        if (b.length > 4 && b[0] == "t" && b[1] == "i" && b[2] == "l" && b[3] == "t") {
+            bytes memory result = new bytes(b.length - 4);
+            for (uint256 i = 4; i < b.length; i++) {
+                result[i - 4] = b[i];
+            }
+            return string(result);
+        }
+        return s;
     }
 }
