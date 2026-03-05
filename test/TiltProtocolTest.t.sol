@@ -76,6 +76,12 @@ contract TiltProtocolTest is Test {
         router.setPairSupported(address(usdc), address(nvda), true);
         router.setAuthorizedCaller(address(engine), true);
 
+        // Authorize router as minter on all tokens (mint-burn swap model)
+        usdc.addMinter(address(router));
+        aapl.addMinter(address(router));
+        msft.addMinter(address(router));
+        nvda.addMinter(address(router));
+
         engine.setAuthorizedCaller(address(uvFactory), true);
 
         uvFactory.setApprovedToken(address(aapl), true);
@@ -86,11 +92,6 @@ contract TiltProtocolTest is Test {
         usdc.mint(alice, INITIAL_USDC);
         usdc.mint(bob, INITIAL_USDC);
         usdc.mint(curator, INITIAL_USDC);
-
-        aapl.mint(address(router), 1_000_000e18);
-        msft.mint(address(router), 1_000_000e18);
-        nvda.mint(address(router), 1_000_000e18);
-        usdc.mint(address(router), 1_000_000e6);
     }
 
     // ===================== FeeManager Tests =====================
@@ -205,15 +206,6 @@ contract TiltProtocolTest is Test {
         assertEq(vault.balanceOf(alice), shares);
     }
 
-    function test_UserVault_rebalance_onlyCurator() public {
-        address vaultAddr = _createUserVault();
-        UserVault vault = UserVault(vaultAddr);
-
-        vm.prank(alice);
-        vm.expectRevert(UserVault.OnlyCurator.selector);
-        vault.rebalance();
-    }
-
     function test_UserVault_pause() public {
         address vaultAddr = _createUserVault();
         UserVault vault = UserVault(vaultAddr);
@@ -237,30 +229,20 @@ contract TiltProtocolTest is Test {
         vm.stopPrank();
     }
 
-    function test_UserVault_depositAndRebalance() public {
+    function test_UserVault_depositAndAllocate() public {
         address vaultAddr = _createUserVault();
         UserVault vault = UserVault(vaultAddr);
 
-        vm.warp(block.timestamp + 5 hours);
-        vm.startPrank(curator);
-        usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
-        uint256 shares = vault.depositAndRebalance(DEPOSIT_AMOUNT, curator);
-        vm.stopPrank();
-
-        assertTrue(shares > 0);
-        address[] memory held = vault.getHeldTokens();
-        assertTrue(held.length > 0);
-    }
-
-    function test_UserVault_depositAndRebalance_unauthorized() public {
-        address vaultAddr = _createUserVault();
-        UserVault vault = UserVault(vaultAddr);
+        // First allocate the seed deposit so there are held tokens
+        vault.allocateIdleAssets();
 
         vm.startPrank(alice);
         usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
-        vm.expectRevert(UserVault.UnauthorizedRebalance.selector);
-        vault.depositAndRebalance(DEPOSIT_AMOUNT, alice);
+        vault.depositAndAllocate(DEPOSIT_AMOUNT, alice);
         vm.stopPrank();
+
+        address[] memory held = vault.getHeldTokens();
+        assertTrue(held.length > 0);
     }
 
     // ===================== UserVault Time-lock Tests =====================
@@ -322,36 +304,6 @@ contract TiltProtocolTest is Test {
 
         (,, bool pendingAfter) = vault.pendingRebalanceEngine();
         assertFalse(pendingAfter);
-    }
-
-    function test_UserVault_cancelPendingWeights() public {
-        address vaultAddr = _createUserVault();
-        UserVault vault = UserVault(vaultAddr);
-
-        IBaseVault.TokenWeight[] memory weights = new IBaseVault.TokenWeight[](2);
-        weights[0] = IBaseVault.TokenWeight({token: address(aapl), weightBps: 7000});
-        weights[1] = IBaseVault.TokenWeight({token: address(msft), weightBps: 3000});
-
-        vm.prank(curator);
-        vault.setTargetWeights(weights);
-        assertTrue(vault.hasPendingWeights());
-
-        vm.prank(curator);
-        vault.cancelPendingWeights();
-        assertFalse(vault.hasPendingWeights());
-    }
-
-    function test_UserVault_duplicateToken_reverts() public {
-        address vaultAddr = _createUserVault();
-        UserVault vault = UserVault(vaultAddr);
-
-        IBaseVault.TokenWeight[] memory weights = new IBaseVault.TokenWeight[](2);
-        weights[0] = IBaseVault.TokenWeight({token: address(aapl), weightBps: 5000});
-        weights[1] = IBaseVault.TokenWeight({token: address(aapl), weightBps: 5000});
-
-        vm.prank(curator);
-        vm.expectRevert(UserVault.DuplicateToken.selector);
-        vault.setTargetWeights(weights);
     }
 
     // ===================== Router Tests =====================
@@ -522,10 +474,9 @@ contract TiltProtocolTest is Test {
         address vaultAddr = _createUserVault();
         UserVault vault = UserVault(vaultAddr);
 
-        vm.warp(block.timestamp + 5 hours);
-        vm.startPrank(curator);
+        vm.startPrank(alice);
         usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
-        vault.depositAndRebalance(DEPOSIT_AMOUNT, curator);
+        vault.depositAndAllocate(DEPOSIT_AMOUNT, alice);
         vm.stopPrank();
 
         address[] memory held = vault.getHeldTokens();
@@ -543,10 +494,9 @@ contract TiltProtocolTest is Test {
         address vaultAddr = _createUserVault();
         UserVault vault = UserVault(vaultAddr);
 
-        vm.warp(block.timestamp + 5 hours);
-        vm.startPrank(curator);
+        vm.startPrank(alice);
         usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
-        vault.depositAndRebalance(DEPOSIT_AMOUNT, curator);
+        vault.depositAndAllocate(DEPOSIT_AMOUNT, alice);
         vm.stopPrank();
 
         router.clearTokenPrice(address(aapl));
@@ -571,10 +521,9 @@ contract TiltProtocolTest is Test {
         address vaultAddr = _createUserVault();
         UserVault vault = UserVault(vaultAddr);
 
-        vm.warp(block.timestamp + 5 hours);
-        vm.startPrank(curator);
+        vm.startPrank(alice);
         usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
-        vault.depositAndRebalance(DEPOSIT_AMOUNT, curator);
+        vault.depositAndAllocate(DEPOSIT_AMOUNT, alice);
         vm.stopPrank();
 
         address[] memory held = vault.getHeldTokens();
@@ -584,18 +533,14 @@ contract TiltProtocolTest is Test {
 
     // ===================== Emergency Withdraw =====================
 
-    function test_emergencyWithdraw_afterRebalance() public {
+    function test_emergencyWithdraw_afterAllocate() public {
         address vaultAddr = _createUserVault();
         UserVault vault = UserVault(vaultAddr);
 
         vm.startPrank(alice);
         usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
-        vault.deposit(DEPOSIT_AMOUNT, alice);
+        vault.depositAndAllocate(DEPOSIT_AMOUNT, alice);
         vm.stopPrank();
-
-        vm.warp(block.timestamp + 5 hours);
-        vm.prank(curator);
-        vault.rebalance();
 
         assertTrue(aapl.balanceOf(vaultAddr) > 0, "vault should hold AAPL");
 
@@ -615,12 +560,8 @@ contract TiltProtocolTest is Test {
 
         vm.startPrank(alice);
         usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
-        vault.deposit(DEPOSIT_AMOUNT, alice);
+        vault.depositAndAllocate(DEPOSIT_AMOUNT, alice);
         vm.stopPrank();
-
-        vm.warp(block.timestamp + 5 hours);
-        vm.prank(curator);
-        vault.rebalance();
 
         vm.prank(curator);
         vault.pause();
@@ -638,12 +579,8 @@ contract TiltProtocolTest is Test {
 
         vm.startPrank(alice);
         usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
-        vault.deposit(DEPOSIT_AMOUNT, alice);
+        vault.depositAndAllocate(DEPOSIT_AMOUNT, alice);
         vm.stopPrank();
-
-        vm.warp(block.timestamp + 5 hours);
-        vm.prank(curator);
-        vault.rebalance();
 
         router.clearTokenPrice(address(aapl));
         router.clearTokenPrice(address(msft));
@@ -668,20 +605,14 @@ contract TiltProtocolTest is Test {
 
         vm.startPrank(alice);
         usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
-        uint256 shares = vault.deposit(DEPOSIT_AMOUNT, alice);
+        uint256 shares = vault.depositAndAllocate(DEPOSIT_AMOUNT, alice);
         vm.stopPrank();
 
         assertTrue(shares > 0, "should receive shares");
-        uint256 priceBefore = vault.sharePrice();
-        assertApproxEqRel(priceBefore, 1e18, 0.01e18);
 
-        vm.warp(block.timestamp + 5 hours);
-        vm.prank(curator);
-        vault.rebalance();
-
-        uint256 navAfterRebalance = vault.totalAssets();
+        uint256 navAfterAllocate = vault.totalAssets();
         uint256 expectedNav = SEED_AMOUNT + DEPOSIT_AMOUNT;
-        assertApproxEqRel(navAfterRebalance, expectedNav, 0.02e18);
+        assertApproxEqRel(navAfterAllocate, expectedNav, 0.02e18);
 
         address[] memory held = vault.getHeldTokens();
         assertTrue(held.length == 2, "should hold 2 stock tokens");
@@ -691,7 +622,7 @@ contract TiltProtocolTest is Test {
         // Simulate price increase: AAPL $195 -> $250
         router.setTokenPrice(address(aapl), 250e18);
         uint256 navAfterPriceUp = vault.totalAssets();
-        assertTrue(navAfterPriceUp > navAfterRebalance, "NAV should increase with AAPL price");
+        assertTrue(navAfterPriceUp > navAfterAllocate, "NAV should increase with AAPL price");
 
         uint256 priceAfterUp = vault.sharePrice();
         assertTrue(priceAfterUp > 1e18, "share price should reflect gains");

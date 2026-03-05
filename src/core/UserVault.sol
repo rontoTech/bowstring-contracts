@@ -10,23 +10,25 @@ import {IRebalanceEngine} from "../interfaces/IRebalanceEngine.sol";
 import {ITokenRouter} from "../interfaces/ITokenRouter.sol";
 
 /// @title UserVault
-/// @notice Permissionless vault where a curator sets target portfolio weights.
-///         Anyone can create one via VaultFactory. Curator earns fee split.
+/// @notice Permissionless vault where a curator manages a stock portfolio.
+///         Curator executes individual trades via executeTrade().
+///         Investor deposits are auto-allocated into the current portfolio composition.
 ///         Critical config changes (engine, router, base asset) are time-locked
 ///         to protect depositors from curator rug pulls.
 contract UserVault is BaseVault {
     using SafeERC20 for IERC20;
-    // --- State ---
+
+    // ===========================================================
+    //  STORAGE — layout must not change (beacon proxy compatibility)
+    // ===========================================================
     address public curator;
     IBaseVault.TokenWeight[] private _targetWeights;
 
-    // --- Weight Management ---
-    uint256 public weightChangeTimeLock; // seconds delay for weight changes
-    uint256 public pendingWeightChangeTime; // when pending weights take effect
-    IBaseVault.TokenWeight[] private _pendingWeights;
-    bool public hasPendingWeights;
+    uint256 public weightChangeTimeLock; // used for config change time-locks
+    uint256 private __deprecated_pendingWeightChangeTime;
+    IBaseVault.TokenWeight[] private __deprecated_pendingWeights;
+    bool private __deprecated_hasPendingWeights;
 
-    // --- Config Change Time-lock ---
     struct PendingAddress {
         address value;
         uint256 effectiveTime;
@@ -37,17 +39,14 @@ contract UserVault is BaseVault {
     PendingAddress public pendingTokenRouter;
     PendingAddress public pendingBaseAsset;
 
-    uint256 public minRebalanceInterval; // minimum seconds between rebalances
-    uint256 public lastRebalanceTimestamp;
+    uint256 private __deprecated_minRebalanceInterval;
+    uint256 private __deprecated_lastRebalanceTimestamp;
 
-    // --- Token whitelist ---
     mapping(address => bool) public approvedTokens;
     address[] public approvedTokenList;
 
     // --- Events ---
     event CuratorTransferred(address indexed previousCurator, address indexed newCurator);
-    event TargetWeightsUpdated(IBaseVault.TokenWeight[] weights);
-    event WeightChangePending(IBaseVault.TokenWeight[] weights, uint256 effectiveTime);
     event TimeLockUpdated(uint256 newTimeLock);
     event TokenApproved(address indexed token, bool approved);
     event ConfigChangeProposed(bytes32 indexed configKey, address newValue, uint256 effectiveTime);
@@ -56,15 +55,8 @@ contract UserVault is BaseVault {
 
     // --- Errors ---
     error OnlyCurator();
-    error InvalidWeights();
-    error TokenNotApproved();
-    error DuplicateToken();
-    error RebalanceTooSoon();
-    error PendingWeightsNotReady();
-    error WeightsNotChanged();
     error NoPendingChange();
     error TimeLockNotExpired();
-    error UnauthorizedRebalance();
     error UnauthorizedUnpause();
 
     modifier onlyCurator() {
@@ -95,7 +87,7 @@ contract UserVault is BaseVault {
         require(_curator != address(0), "UserVault: zero curator");
         curator = _curator;
         weightChangeTimeLock = _timeLock;
-        minRebalanceInterval = _minRebalanceInterval;
+        // _minRebalanceInterval accepted for factory ABI compatibility but unused
         highWaterMark = 1e18;
 
         for (uint256 i = 0; i < _approvedTokens.length; i++) {
@@ -123,54 +115,12 @@ contract UserVault is BaseVault {
         emit CuratorTransferred(prev, newCurator);
     }
 
-    /// @notice Update the weight change time lock. Curator or protocol admin.
+    /// @notice Update the config change time lock. Curator or protocol admin.
     function setWeightChangeTimeLock(uint256 _timeLock) external {
         bool isCurator = msg.sender == curator;
         bool isProtocolAdmin = msg.sender == feeManager.owner();
         if (!isCurator && !isProtocolAdmin) revert OnlyCurator();
         weightChangeTimeLock = _timeLock;
-    }
-
-    /// @notice Update the minimum rebalance interval. Curator or protocol admin.
-    function setMinRebalanceInterval(uint256 _interval) external {
-        bool isCurator = msg.sender == curator;
-        bool isProtocolAdmin = msg.sender == feeManager.owner();
-        if (!isCurator && !isProtocolAdmin) revert OnlyCurator();
-        minRebalanceInterval = _interval;
-    }
-
-    // ===================== Weight Management =====================
-
-    /// @notice Set new target weights. If time-lock is active, weights go pending.
-    function setTargetWeights(IBaseVault.TokenWeight[] calldata weights) external onlyCurator {
-        _validateWeights(weights);
-
-        if (weightChangeTimeLock == 0) {
-            _setWeights(weights);
-        } else {
-            delete _pendingWeights;
-            for (uint256 i = 0; i < weights.length; i++) {
-                _pendingWeights.push(weights[i]);
-            }
-            pendingWeightChangeTime = block.timestamp + weightChangeTimeLock;
-            hasPendingWeights = true;
-            emit WeightChangePending(weights, pendingWeightChangeTime);
-        }
-    }
-
-    /// @notice Apply pending weights after time-lock expires. Only curator can apply.
-    function applyPendingWeights() external onlyCurator {
-        if (!hasPendingWeights) revert WeightsNotChanged();
-        if (block.timestamp < pendingWeightChangeTime) revert PendingWeightsNotReady();
-
-        delete _targetWeights;
-        for (uint256 i = 0; i < _pendingWeights.length; i++) {
-            _targetWeights.push(_pendingWeights[i]);
-        }
-        delete _pendingWeights;
-        hasPendingWeights = false;
-
-        emit TargetWeightsUpdated(_targetWeights);
     }
 
     // ===================== Time-locked Config Changes =====================
@@ -292,14 +242,6 @@ contract UserVault is BaseVault {
         emit ConfigChangeCancelled("baseAsset");
     }
 
-    /// @notice Cancel pending weight changes
-    function cancelPendingWeights() external onlyCurator {
-        if (!hasPendingWeights) revert WeightsNotChanged();
-        delete _pendingWeights;
-        hasPendingWeights = false;
-        emit ConfigChangeCancelled("targetWeights");
-    }
-
     // ===================== Withdrawal Slippage (time-locked) =====================
 
     struct PendingUint256 {
@@ -332,11 +274,11 @@ contract UserVault is BaseVault {
         emit WithdrawalSlippageUpdated(pendingWithdrawalSlippage.value);
     }
 
-    // ===================== Single Trade =====================
+    // ===================== Trading =====================
 
-    /// @notice Execute a single buy or sell without full portfolio rebalance.
-    ///         Curator specifies the exact trade; target weights are synced afterward
-    ///         so future rebalances won't undo the trade.
+    /// @notice Execute a single buy or sell.
+    ///         Curator specifies the exact trade; held tokens and target weights
+    ///         are updated afterward so new deposits allocate proportionally.
     function executeTrade(
         address tokenIn,
         address tokenOut,
@@ -362,13 +304,13 @@ contract UserVault is BaseVault {
 
         IERC20(tokenIn).forceApprove(address(rebalanceEngine), 0);
 
-        // Add bought token to held tokens tracking if new
         if (tokenOut != address(baseAsset) && !isHeldToken[tokenOut]) {
             heldTokens.push(tokenOut);
             isHeldToken[tokenOut] = true;
         }
 
-        // Sync target weights to actual portfolio so rebalance() won't undo this trade
+        // Sync target weights to actual portfolio (used as first-allocation
+        // fallback when _allocateUnallocated sees an empty getCurrentWeights)
         IBaseVault.TokenWeight[] memory current = this.getCurrentWeights();
         delete _targetWeights;
         for (uint256 i = 0; i < current.length; i++) {
@@ -376,37 +318,6 @@ contract UserVault is BaseVault {
                 _targetWeights.push(current[i]);
             }
         }
-    }
-
-    // ===================== Rebalance =====================
-
-    /// @notice Trigger rebalance - only curator. Protected against reentrancy and paused state.
-    function rebalance() external override onlyCurator nonReentrant whenNotPaused {
-        if (block.timestamp - lastRebalanceTimestamp < minRebalanceInterval) {
-            revert RebalanceTooSoon();
-        }
-
-        _accrueManagementFee();
-        _executeRebalance();
-        lastRebalanceTimestamp = block.timestamp;
-    }
-
-    /// @notice Deposit + rebalance with same access control as rebalance().
-    ///         Prevents unauthorized callers from triggering rebalances via deposit.
-    function depositAndRebalance(uint256 assets, address receiver)
-        external
-        override
-        nonReentrant
-        whenNotPaused
-        returns (uint256 shares)
-    {
-        if (msg.sender != curator) revert UnauthorizedRebalance();
-        if (block.timestamp - lastRebalanceTimestamp < minRebalanceInterval) {
-            revert RebalanceTooSoon();
-        }
-        shares = _deposit(assets, receiver);
-        _executeRebalance();
-        lastRebalanceTimestamp = block.timestamp;
     }
 
     // ===================== Emergency =====================
@@ -426,38 +337,57 @@ contract UserVault is BaseVault {
         _unpause();
     }
 
+    // ===================== Migration =====================
+
+    event TokenMigrated(address indexed oldToken, address indexed newToken);
+
+    /// @notice Swap an old token address for a new one across all vault accounting.
+    ///         Protocol admin only. The migration script must mint matching new-token
+    ///         balances to this vault BEFORE calling this function.
+    function migrateToken(address oldToken, address newToken) external {
+        require(msg.sender == feeManager.owner(), "UserVault: only protocol admin");
+        require(oldToken != newToken, "UserVault: same token");
+        require(newToken != address(0), "UserVault: zero new token");
+
+        for (uint256 i = 0; i < heldTokens.length; i++) {
+            if (heldTokens[i] == oldToken) {
+                heldTokens[i] = newToken;
+                break;
+            }
+        }
+        if (isHeldToken[oldToken]) {
+            isHeldToken[oldToken] = false;
+            isHeldToken[newToken] = true;
+        }
+
+        for (uint256 i = 0; i < _targetWeights.length; i++) {
+            if (_targetWeights[i].token == oldToken) {
+                _targetWeights[i].token = newToken;
+                break;
+            }
+        }
+
+        if (approvedTokens[oldToken]) {
+            approvedTokens[oldToken] = false;
+            approvedTokens[newToken] = true;
+            for (uint256 i = 0; i < approvedTokenList.length; i++) {
+                if (approvedTokenList[i] == oldToken) {
+                    approvedTokenList[i] = newToken;
+                    break;
+                }
+            }
+        }
+
+        emit TokenMigrated(oldToken, newToken);
+    }
+
     // ===================== Internal =====================
 
     function _getTargetWeights() internal view override returns (IBaseVault.TokenWeight[] memory) {
         return _targetWeights;
     }
 
-    function _setWeights(IBaseVault.TokenWeight[] calldata weights) internal {
-        delete _targetWeights;
-        for (uint256 i = 0; i < weights.length; i++) {
-            _targetWeights.push(weights[i]);
-        }
-        emit TargetWeightsUpdated(_targetWeights);
-    }
-
-    function _validateWeights(IBaseVault.TokenWeight[] calldata weights) internal view {
-        uint256 totalBps = 0;
-        for (uint256 i = 0; i < weights.length; i++) {
-            if (!approvedTokens[weights[i].token]) revert TokenNotApproved();
-            // Check for duplicate tokens
-            for (uint256 j = i + 1; j < weights.length; j++) {
-                if (weights[i].token == weights[j].token) revert DuplicateToken();
-            }
-            totalBps += weights[i].weightBps;
-        }
-        if (totalBps == 0 || totalBps > 10000) revert InvalidWeights();
-    }
-
     function getApprovedTokens() external view returns (address[] memory) {
         return approvedTokenList;
-    }
-
-    function getPendingWeights() external view returns (IBaseVault.TokenWeight[] memory) {
-        return _pendingWeights;
     }
 }

@@ -48,7 +48,6 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
     // --- Events ---
     event Deposited(address indexed depositor, uint256 assets, uint256 shares);
     event Withdrawn(address indexed withdrawer, uint256 assets, uint256 shares);
-    event RebalanceTriggered(uint256 timestamp);
     event IdleAssetsAllocated(uint256 baseAllocated, uint256 tradeCount, uint256 timestamp);
     event BaseAssetUpdated(address indexed oldAsset, address indexed newAsset);
     event FeeSharesMinted(uint256 feeShares, address indexed recipient);
@@ -115,19 +114,6 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
         returns (uint256 shares)
     {
         shares = _deposit(assets, receiver);
-    }
-
-    /// @notice Deposit base assets, receive shares, and immediately rebalance into target portfolio.
-    ///         Subclasses MUST override to enforce rebalance access control.
-    function depositAndRebalance(uint256 assets, address receiver)
-        external
-        virtual
-        nonReentrant
-        whenNotPaused
-        returns (uint256 shares)
-    {
-        shares = _deposit(assets, receiver);
-        _executeRebalance();
     }
 
     /// @notice Deposit using EIP-2612 permit — approve + deposit in a single transaction.
@@ -366,53 +352,6 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
         return heldTokens;
     }
 
-    // ===================== Rebalance =====================
-
-    /// @notice Trigger a rebalance. Access control is in subclasses.
-    function rebalance() external virtual;
-
-    function _executeRebalance() internal {
-        IBaseVault.TokenWeight[] memory currentWeights = this.getCurrentWeights();
-        IBaseVault.TokenWeight[] memory targetWeights = _getTargetWeights();
-
-        uint256 totalValue = _totalAssets();
-
-        if (address(rebalanceEngine) != address(0) && totalValue > 0) {
-            // Approve max for duration of rebalance: sell trades return base to
-            // the vault, and subsequent buy trades pull it back out. The needed
-            // amount isn't known upfront, so we approve max and reset to 0 after.
-            baseAsset.forceApprove(address(rebalanceEngine), type(uint256).max);
-            for (uint256 i = 0; i < heldTokens.length; i++) {
-                uint256 bal = IERC20(heldTokens[i]).balanceOf(address(this));
-                if (bal > 0) {
-                    IERC20(heldTokens[i]).forceApprove(address(rebalanceEngine), type(uint256).max);
-                }
-            }
-
-            IRebalanceEngine.TradeOrder[] memory trades = rebalanceEngine.calculateRebalance(
-                address(this), currentWeights, targetWeights, totalValue
-            );
-
-            if (trades.length > 0) {
-                rebalanceEngine.executeRebalance(address(this), trades);
-            }
-
-            // Reset all approvals to 0 after rebalance to prevent residual allowance buildup
-            baseAsset.forceApprove(address(rebalanceEngine), 0);
-            for (uint256 i = 0; i < heldTokens.length; i++) {
-                IERC20(heldTokens[i]).forceApprove(address(rebalanceEngine), 0);
-            }
-        }
-
-        // Keeper-triggered rebalance handles all assets including new deposits
-        unallocatedDeposits = 0;
-
-        // Update held tokens tracking — preserves tokens with non-zero balances
-        _updateHeldTokens(targetWeights);
-
-        emit RebalanceTriggered(block.timestamp);
-    }
-
     // ===================== Idle Allocation =====================
 
     /// @notice Deposit and immediately allocate into the target portfolio in one tx.
@@ -435,9 +374,11 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
         _allocateUnallocated();
     }
 
-    /// @dev Core allocation logic: buys into target weights proportionally
-    ///      using only `unallocatedDeposits`. Never sells existing positions,
-    ///      never touches intentional cash held by the fund manager.
+    /// @dev Core allocation logic: buys proportionally into the portfolio's
+    ///      current composition using only `unallocatedDeposits`. Never sells
+    ///      existing positions, never touches intentional cash held by the
+    ///      fund manager. Falls back to target weights for the first allocation
+    ///      (empty portfolio after vault creation).
     function _allocateUnallocated() internal {
         if (unallocatedDeposits == 0) return;
         if (address(rebalanceEngine) == address(0)) return;
@@ -447,37 +388,40 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
         uint256 allocatable = unallocatedDeposits < actualBase ? unallocatedDeposits : actualBase;
         if (allocatable == 0) return;
 
-        IBaseVault.TokenWeight[] memory targetWeights = _getTargetWeights();
-        if (targetWeights.length == 0) return;
-
-        uint256 totalTargetBps = 0;
-        for (uint256 i = 0; i < targetWeights.length; i++) {
-            totalTargetBps += targetWeights[i].weightBps;
+        IBaseVault.TokenWeight[] memory weights = this.getCurrentWeights();
+        if (weights.length == 0) {
+            weights = _getTargetWeights();
         }
-        if (totalTargetBps == 0) return;
+        if (weights.length == 0) return;
+
+        uint256 totalBps = 0;
+        for (uint256 i = 0; i < weights.length; i++) {
+            totalBps += weights[i].weightBps;
+        }
+        if (totalBps == 0) return;
 
         unallocatedDeposits -= allocatable;
 
         baseAsset.forceApprove(address(rebalanceEngine), allocatable);
 
         IRebalanceEngine.TradeOrder[] memory trades =
-            new IRebalanceEngine.TradeOrder[](targetWeights.length);
+            new IRebalanceEngine.TradeOrder[](weights.length);
         uint256 tradeCount = 0;
 
-        for (uint256 i = 0; i < targetWeights.length; i++) {
-            if (targetWeights[i].weightBps == 0) continue;
+        for (uint256 i = 0; i < weights.length; i++) {
+            if (weights[i].weightBps == 0) continue;
 
-            uint256 buyAmount = (allocatable * targetWeights[i].weightBps) / 10000;
+            uint256 buyAmount = (allocatable * weights[i].weightBps) / totalBps;
             if (buyAmount == 0) continue;
 
             uint256 expectedOut = tokenRouter.getQuote(
-                address(baseAsset), targetWeights[i].token, buyAmount
+                address(baseAsset), weights[i].token, buyAmount
             );
             uint256 minOut = (expectedOut * (10000 - withdrawalSlippageBps)) / 10000;
 
             trades[tradeCount] = IRebalanceEngine.TradeOrder({
                 tokenIn: address(baseAsset),
-                tokenOut: targetWeights[i].token,
+                tokenOut: weights[i].token,
                 amountIn: buyAmount,
                 minAmountOut: minOut
             });
@@ -494,7 +438,7 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
         }
 
         baseAsset.forceApprove(address(rebalanceEngine), 0);
-        _updateHeldTokens(targetWeights);
+        _updateHeldTokens(weights);
 
         emit IdleAssetsAllocated(allocatable, tradeCount, block.timestamp);
     }

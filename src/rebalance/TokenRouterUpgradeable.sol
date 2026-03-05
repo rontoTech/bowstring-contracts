@@ -1,56 +1,60 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.24;
 
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ITokenRouter} from "../interfaces/ITokenRouter.sol";
 
-/// @notice Minimal interface for tokens that support authorized mint/burn.
 interface IMintBurnable {
     function mint(address to, uint256 amount) external;
     function burn(address from, uint256 amount) external;
 }
 
-/// @title MockTokenRouter
-/// @notice Mint-burn router for testnet — swaps at oracle price with infinite liquidity.
-///         On swap: burns tokenIn from the caller, mints tokenOut to the recipient.
-///         No pre-funded reserves needed.
-contract MockTokenRouter is ITokenRouter, Ownable, ReentrancyGuard {
+/// @title TokenRouterUpgradeable
+/// @notice UUPS-proxied hybrid router: mint/burn for stock tokens, transfer for base asset.
+///         On swap the router burns the incoming stock token and mints the outgoing stock
+///         token (infinite liquidity). For the base asset (tiltUSDC) it uses held balances
+///         instead of mint/burn, since the existing TiltUSDC contract is kept as-is.
+contract TokenRouterUpgradeable is Initializable, OwnableUpgradeable, UUPSUpgradeable, ReentrancyGuard, ITokenRouter {
     using SafeERC20 for IERC20;
 
-    // --- Price oracle (simple mock) ---
+    address public baseAsset;
+
     mapping(address => uint256) public tokenPrices;
-
-    // --- Supported pairs ---
     mapping(address => mapping(address => bool)) public pairSupported;
-
-    // --- Authorized callers (RebalanceEngine) ---
     mapping(address => bool) public authorizedCallers;
-
-    // --- Decimal overrides ---
     mapping(address => uint8) public decimalOverride;
     mapping(address => bool) public hasDecimalOverride;
 
-    // --- Events ---
     event PriceUpdated(address indexed token, uint256 price);
     event PairUpdated(address indexed tokenA, address indexed tokenB, bool supported);
     event CallerAuthorized(address indexed caller, bool authorized);
 
-    // --- Errors ---
     error UnauthorizedCaller();
     error UnsupportedPair();
     error InsufficientOutput();
     error ZeroPrice();
 
-    constructor() Ownable(msg.sender) {}
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    function initialize(address owner_, address baseAsset_) external initializer {
+        __Ownable_init(owner_);
+        require(baseAsset_ != address(0), "TokenRouter: zero base asset");
+        baseAsset = baseAsset_;
+    }
 
     // ===================== Admin =====================
 
     function setTokenPrice(address token, uint256 priceUsd18) external onlyOwner {
-        require(priceUsd18 > 0, "MockTokenRouter: zero price");
+        require(priceUsd18 > 0, "TokenRouter: zero price");
         tokenPrices[token] = priceUsd18;
         emit PriceUpdated(token, priceUsd18);
     }
@@ -61,9 +65,9 @@ contract MockTokenRouter is ITokenRouter, Ownable, ReentrancyGuard {
     }
 
     function setTokenPricesBatch(address[] calldata tokens, uint256[] calldata prices) external onlyOwner {
-        require(tokens.length == prices.length, "MockTokenRouter: length mismatch");
+        require(tokens.length == prices.length, "TokenRouter: length mismatch");
         for (uint256 i = 0; i < tokens.length; i++) {
-            require(prices[i] > 0, "MockTokenRouter: zero price");
+            require(prices[i] > 0, "TokenRouter: zero price");
             tokenPrices[tokens[i]] = prices[i];
             emit PriceUpdated(tokens[i], prices[i]);
         }
@@ -85,12 +89,12 @@ contract MockTokenRouter is ITokenRouter, Ownable, ReentrancyGuard {
         hasDecimalOverride[token] = true;
     }
 
-    // ===================== ITokenRouter =====================
+    // ===================== Swap =====================
 
-    /// @notice Execute a swap at oracle prices using mint/burn (infinite liquidity).
-    ///         1. Transfers tokenIn from caller to this contract
-    ///         2. Burns the received tokenIn
-    ///         3. Mints tokenOut directly to the recipient
+    /// @notice Hybrid swap: mint/burn for stock tokens, transfer for base asset.
+    ///   BUY stock  (baseAsset -> stock): receive baseAsset (hold it), mint stock to recipient
+    ///   SELL stock (stock -> baseAsset): receive stock (burn it), transfer baseAsset to recipient
+    ///   stock-to-stock: receive tokenIn (burn), mint tokenOut
     function swap(
         address tokenIn,
         address tokenOut,
@@ -106,13 +110,21 @@ contract MockTokenRouter is ITokenRouter, Ownable, ReentrancyGuard {
 
         IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
 
-        IMintBurnable(tokenIn).burn(address(this), amountIn);
-        IMintBurnable(tokenOut).mint(recipient, amountOut);
+        if (tokenIn != baseAsset) {
+            IMintBurnable(tokenIn).burn(address(this), amountIn);
+        }
+
+        if (tokenOut == baseAsset) {
+            IERC20(tokenOut).safeTransfer(recipient, amountOut);
+        } else {
+            IMintBurnable(tokenOut).mint(recipient, amountOut);
+        }
 
         emit Swap(tokenIn, tokenOut, amountIn, amountOut, recipient);
     }
 
-    /// @notice Get a price quote, normalizing for decimal differences between tokens.
+    // ===================== Views =====================
+
     function getQuote(address tokenIn, address tokenOut, uint256 amountIn)
         public
         view
@@ -121,7 +133,6 @@ contract MockTokenRouter is ITokenRouter, Ownable, ReentrancyGuard {
     {
         uint256 priceIn = tokenPrices[tokenIn];
         uint256 priceOut = tokenPrices[tokenOut];
-
         if (priceIn == 0) revert ZeroPrice();
         if (priceOut == 0) revert ZeroPrice();
 
@@ -135,6 +146,14 @@ contract MockTokenRouter is ITokenRouter, Ownable, ReentrancyGuard {
         }
     }
 
+    function isPairSupported(address tokenIn, address tokenOut) external view override returns (bool) {
+        return pairSupported[tokenIn][tokenOut];
+    }
+
+    function getTokenPrice(address token) external view override returns (uint256) {
+        return tokenPrices[token];
+    }
+
     function _decimals(address token) internal view returns (uint256) {
         if (hasDecimalOverride[token]) return uint256(decimalOverride[token]);
         try IERC20Metadata(token).decimals() returns (uint8 d) {
@@ -144,11 +163,9 @@ contract MockTokenRouter is ITokenRouter, Ownable, ReentrancyGuard {
         }
     }
 
-    function isPairSupported(address tokenIn, address tokenOut) external view override returns (bool) {
-        return pairSupported[tokenIn][tokenOut];
-    }
+    // ===================== UUPS =====================
 
-    function getTokenPrice(address token) external view override returns (uint256) {
-        return tokenPrices[token];
-    }
+    function _authorizeUpgrade(address) internal override onlyOwner {}
+
+    uint256[43] private __gap;
 }

@@ -18,15 +18,11 @@ interface IBaseVault is IERC4626 {
         uint16 exitFeeBps;
         uint16 managementFeeBps; // annualized
         uint16 performanceFeeBps;
-        uint256 rebalanceThresholdBps;
+        uint256 rebalanceThresholdBps; // kept for ABI compatibility
     }
 
-    event Rebalanced(TokenWeight[] newWeights, uint256 timestamp);
     event FeesAccrued(uint256 managementFee, uint256 performanceFee);
     event FeesCollected(address indexed recipient, uint256 amount);
-
-    /// @notice Trigger a rebalance to match target weights
-    function rebalance() external;
 
     /// @notice Allocate idle base assets into the portfolio proportionally.
     ///         Open to anyone — depositors can immediately put funds to work.
