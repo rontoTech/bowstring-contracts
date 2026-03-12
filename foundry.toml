@@ -19,7 +19,7 @@ remappings = [
 runs = 256
 
 [rpc_endpoints]
-robinhood_testnet = "https://rpc.testnet.chain.robinhood.com"
+robinhood_testnet = "${RPC_URL}"
 
 [etherscan]
 robinhood_testnet = { key = "${ETHERSCAN_API_KEY}", url = "https://explorer.testnet.chain.robinhood.com/api" }
