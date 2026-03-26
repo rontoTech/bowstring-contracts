@@ -52,15 +52,22 @@ contract UserVault is BaseVault {
     event ConfigChangeProposed(bytes32 indexed configKey, address newValue, uint256 effectiveTime);
     event ConfigChangeApplied(bytes32 indexed configKey, address newValue);
     event ConfigChangeCancelled(bytes32 indexed configKey);
+    event DelegateUpdated(address indexed delegate, bool authorized);
 
     // --- Errors ---
     error OnlyCurator();
+    error OnlyCuratorOrDelegate();
     error NoPendingChange();
     error TimeLockNotExpired();
     error UnauthorizedUnpause();
 
     modifier onlyCurator() {
         if (msg.sender != curator) revert OnlyCurator();
+        _;
+    }
+
+    modifier onlyCuratorOrDelegate() {
+        if (msg.sender != curator && !delegates[msg.sender]) revert OnlyCuratorOrDelegate();
         _;
     }
 
@@ -252,6 +259,9 @@ contract UserVault is BaseVault {
 
     PendingUint256 public pendingWithdrawalSlippage;
 
+    // --- Delegate trading (added for API-driven execution) ---
+    mapping(address => bool) public delegates;
+
     function setWithdrawalSlippage(uint256 _slippageBps) external override onlyCurator {
         require(_slippageBps <= 1000, "UserVault: slippage too high");
         if (weightChangeTimeLock == 0) {
@@ -274,17 +284,29 @@ contract UserVault is BaseVault {
         emit WithdrawalSlippageUpdated(pendingWithdrawalSlippage.value);
     }
 
+    // ===================== Delegation =====================
+
+    /// @notice Authorize or revoke a delegate that can call executeTrade on
+    ///         behalf of the curator. Delegates cannot withdraw, pause, or
+    ///         change any vault configuration — trade-only permission.
+    function setDelegate(address delegate, bool authorized) external onlyCurator {
+        require(delegate != address(0), "UserVault: zero delegate");
+        delegates[delegate] = authorized;
+        emit DelegateUpdated(delegate, authorized);
+    }
+
     // ===================== Trading =====================
 
     /// @notice Execute a single buy or sell.
-    ///         Curator specifies the exact trade; held tokens and target weights
-    ///         are updated afterward so new deposits allocate proportionally.
+    ///         Curator or authorized delegate specifies the exact trade; held
+    ///         tokens and target weights are updated afterward so new deposits
+    ///         allocate proportionally.
     function executeTrade(
         address tokenIn,
         address tokenOut,
         uint256 amountIn,
         uint256 minAmountOut
-    ) external onlyCurator nonReentrant whenNotPaused {
+    ) external onlyCuratorOrDelegate nonReentrant whenNotPaused {
         require(address(rebalanceEngine) != address(0), "UserVault: no engine");
         require(amountIn > 0, "UserVault: zero amount");
 

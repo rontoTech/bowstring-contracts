@@ -678,6 +678,135 @@ contract TiltProtocolTest is Test {
         registry.updateVaultMetadata(vaultAddr, "ipfs://hacked");
     }
 
+    // ===================== Delegate Trading Tests =====================
+
+    function test_delegate_canExecuteTrade() public {
+        address vaultAddr = _createUserVault();
+        UserVault vault = UserVault(vaultAddr);
+
+        // Deposit and allocate so vault holds stock tokens
+        vm.startPrank(alice);
+        usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
+        vault.depositAndAllocate(DEPOSIT_AMOUNT, alice);
+        vm.stopPrank();
+
+        address delegate = makeAddr("delegate");
+
+        // Delegate cannot trade before authorization
+        vm.prank(delegate);
+        vm.expectRevert(UserVault.OnlyCuratorOrDelegate.selector);
+        vault.executeTrade(address(aapl), address(usdc), 1e18, 0);
+
+        // Curator authorizes delegate
+        vm.prank(curator);
+        vault.setDelegate(delegate, true);
+        assertTrue(vault.delegates(delegate));
+
+        uint256 aaplBefore = aapl.balanceOf(vaultAddr);
+        assertTrue(aaplBefore > 0, "vault should hold AAPL");
+
+        // Delegate executes a sell trade
+        vm.prank(delegate);
+        vault.executeTrade(address(aapl), address(usdc), aaplBefore / 2, 0);
+
+        uint256 aaplAfter = aapl.balanceOf(vaultAddr);
+        assertTrue(aaplAfter < aaplBefore, "AAPL balance should decrease after delegate sell");
+    }
+
+    function test_delegate_cannotSetDelegate() public {
+        address vaultAddr = _createUserVault();
+        UserVault vault = UserVault(vaultAddr);
+
+        address delegate = makeAddr("delegate");
+        address rogue = makeAddr("rogue");
+
+        vm.prank(curator);
+        vault.setDelegate(delegate, true);
+
+        // Delegate cannot grant delegate to others
+        vm.prank(delegate);
+        vm.expectRevert(UserVault.OnlyCurator.selector);
+        vault.setDelegate(rogue, true);
+    }
+
+    function test_delegate_cannotPauseOrWithdraw() public {
+        address vaultAddr = _createUserVault();
+        UserVault vault = UserVault(vaultAddr);
+
+        address delegate = makeAddr("delegate");
+        vm.prank(curator);
+        vault.setDelegate(delegate, true);
+
+        // Delegate cannot pause
+        vm.prank(delegate);
+        vm.expectRevert(UserVault.OnlyCurator.selector);
+        vault.pause();
+
+        // Delegate cannot transfer curator
+        vm.prank(delegate);
+        vm.expectRevert(UserVault.OnlyCurator.selector);
+        vault.transferCurator(delegate);
+    }
+
+    function test_delegate_revocation() public {
+        address vaultAddr = _createUserVault();
+        UserVault vault = UserVault(vaultAddr);
+
+        vm.startPrank(alice);
+        usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
+        vault.depositAndAllocate(DEPOSIT_AMOUNT, alice);
+        vm.stopPrank();
+
+        address delegate = makeAddr("delegate");
+
+        vm.prank(curator);
+        vault.setDelegate(delegate, true);
+
+        // Delegate can trade
+        uint256 aaplBal = aapl.balanceOf(vaultAddr);
+        vm.prank(delegate);
+        vault.executeTrade(address(aapl), address(usdc), aaplBal / 4, 0);
+
+        // Curator revokes delegate
+        vm.prank(curator);
+        vault.setDelegate(delegate, false);
+        assertFalse(vault.delegates(delegate));
+
+        // Delegate can no longer trade
+        vm.prank(delegate);
+        vm.expectRevert(UserVault.OnlyCuratorOrDelegate.selector);
+        vault.executeTrade(address(aapl), address(usdc), aaplBal / 4, 0);
+    }
+
+    function test_delegate_zeroAddress_reverts() public {
+        address vaultAddr = _createUserVault();
+        UserVault vault = UserVault(vaultAddr);
+
+        vm.prank(curator);
+        vm.expectRevert("UserVault: zero delegate");
+        vault.setDelegate(address(0), true);
+    }
+
+    function test_curator_canStillTradeWithDelegates() public {
+        address vaultAddr = _createUserVault();
+        UserVault vault = UserVault(vaultAddr);
+
+        vm.startPrank(alice);
+        usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
+        vault.depositAndAllocate(DEPOSIT_AMOUNT, alice);
+        vm.stopPrank();
+
+        address delegate = makeAddr("delegate");
+        vm.prank(curator);
+        vault.setDelegate(delegate, true);
+
+        uint256 aaplBal = aapl.balanceOf(vaultAddr);
+
+        // Curator can still trade
+        vm.prank(curator);
+        vault.executeTrade(address(aapl), address(usdc), aaplBal / 2, 0);
+    }
+
     // ===================== Helpers =====================
 
     function _createUserVault() internal returns (address vault) {
