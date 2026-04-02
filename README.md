@@ -230,18 +230,9 @@ User withdraws
 
 ### Testnet (Robinhood L2)
 
-Current deployment addresses are in [`deployments/robinhood-testnet.json`](./deployments/robinhood-testnet.json).
+Canonical testnet addresses for the live app are in [`bowstring-ui/src/lib/contracts.ts`](../bowstring-ui/src/lib/contracts.ts) (`ADDRESSES`). This repo’s [`deployments/robinhood-testnet.json`](./deployments/robinhood-testnet.json) holds an additional snapshot (including historical stock token address maps).
 
-| Contract | Address |
-|---|---|
-| TiltUSDC | `0x941A382852E989078e15b381f921C488a7Ca5299` |
-| FeeManager | `0x63D367C9A34d94aBD4D2cD0921Dd0F4252E8548A` |
-| VaultRegistry | `0x38485146d0D1E0c700ddBf61206188CFaC170795` |
-| MockTokenRouter | `0x969F9C8Dc7361C8ac4f94cEb0B3c609F6b05dA72` |
-| RebalanceEngine | `0xAfe9CA99AB3CFa2523553E25743eA1463ae35eF2` |
-| UserVaultFactory | `0x67f0C4C9E5804186b049bAFBd69671228e9BCC09` |
-
-Plus 100+ mock stock tokens deployed via `MockStockTokenFactory`.
+Production stock tokens use **StockTokenFactoryUpgradeable** (`ADDRESSES.STOCK_TOKEN_FACTORY`) and **TokenRouter** (`ADDRESSES.TOKEN_ROUTER`). The `MockStockTokenFactory` Solidity contract remains in-tree for **local Forge scripts and tests** only (`Deploy.s.sol`, `DeployMintBurn.s.sol`); it is not a deployed dependency for the current UI or backend.
 
 ### Deploy from scratch
 
