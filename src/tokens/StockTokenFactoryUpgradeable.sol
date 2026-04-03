@@ -24,10 +24,14 @@ contract StockTokenFactoryUpgradeable is Initializable, OwnableUpgradeable, UUPS
     StockTokenInfo[] public deployedTokens;
     mapping(string => address) public tokenBySymbol;
     address public tokenRouter;
+    mapping(address => bool) public authorizedDeployers;
 
     event StockTokenCreated(address indexed token, string name, string symbol);
     event TokenRouterUpdated(address indexed router);
     event BeaconUpgraded(address indexed newImplementation);
+    event DeployerAuthorized(address indexed deployer, bool authorized);
+
+    error UnauthorizedDeployer();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -39,7 +43,19 @@ contract StockTokenFactoryUpgradeable is Initializable, OwnableUpgradeable, UUPS
         beacon = new UpgradeableBeacon(stockTokenImpl_, address(this));
     }
 
+    // ===================== Access helpers =====================
+
+    modifier onlyOwnerOrDeployer() {
+        if (msg.sender != owner() && !authorizedDeployers[msg.sender]) revert UnauthorizedDeployer();
+        _;
+    }
+
     // ===================== Admin =====================
+
+    function setAuthorizedDeployer(address deployer, bool authorized) external onlyOwner {
+        authorizedDeployers[deployer] = authorized;
+        emit DeployerAuthorized(deployer, authorized);
+    }
 
     function setTokenRouter(address _router) external onlyOwner {
         tokenRouter = _router;
@@ -51,13 +67,13 @@ contract StockTokenFactoryUpgradeable is Initializable, OwnableUpgradeable, UUPS
         emit BeaconUpgraded(newImpl);
     }
 
-    // ===================== Token Creation =====================
+    // ===================== Token Creation (owner or authorized deployer) =====================
 
     function createStockToken(
         string calldata name_,
         string calldata symbol_,
         uint256 initialPrice
-    ) external onlyOwner returns (address token) {
+    ) external onlyOwnerOrDeployer returns (address token) {
         bytes memory initData = abi.encodeCall(
             StockTokenUpgradeable.initialize,
             (name_, symbol_, 18, address(this))
@@ -94,7 +110,7 @@ contract StockTokenFactoryUpgradeable is Initializable, OwnableUpgradeable, UUPS
         }
     }
 
-    function mintToken(string calldata symbol, address to, uint256 amount) external onlyOwner {
+    function mintToken(string calldata symbol, address to, uint256 amount) external onlyOwnerOrDeployer {
         address token = tokenBySymbol[symbol];
         require(token != address(0), "StockTokenFactory: token not found");
         StockTokenUpgradeable(token).mint(to, amount);
@@ -114,5 +130,5 @@ contract StockTokenFactoryUpgradeable is Initializable, OwnableUpgradeable, UUPS
 
     function _authorizeUpgrade(address) internal override onlyOwner {}
 
-    uint256[46] private __gap;
+    uint256[45] private __gap;
 }

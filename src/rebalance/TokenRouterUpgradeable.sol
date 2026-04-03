@@ -30,12 +30,15 @@ contract TokenRouterUpgradeable is Initializable, OwnableUpgradeable, UUPSUpgrad
     mapping(address => bool) public authorizedCallers;
     mapping(address => uint8) public decimalOverride;
     mapping(address => bool) public hasDecimalOverride;
+    mapping(address => bool) public authorizedPricers;
 
     event PriceUpdated(address indexed token, uint256 price);
     event PairUpdated(address indexed tokenA, address indexed tokenB, bool supported);
     event CallerAuthorized(address indexed caller, bool authorized);
+    event PricerAuthorized(address indexed pricer, bool authorized);
 
     error UnauthorizedCaller();
+    error UnauthorizedPricer();
     error UnsupportedPair();
     error InsufficientOutput();
     error ZeroPrice();
@@ -51,12 +54,23 @@ contract TokenRouterUpgradeable is Initializable, OwnableUpgradeable, UUPSUpgrad
         baseAsset = baseAsset_;
     }
 
+    // ===================== Access helpers =====================
+
+    modifier onlyOwnerOrPricer() {
+        if (msg.sender != owner() && !authorizedPricers[msg.sender]) revert UnauthorizedPricer();
+        _;
+    }
+
     // ===================== Admin =====================
 
-    function setTokenPrice(address token, uint256 priceUsd18) external onlyOwner {
-        require(priceUsd18 > 0, "TokenRouter: zero price");
-        tokenPrices[token] = priceUsd18;
-        emit PriceUpdated(token, priceUsd18);
+    function setAuthorizedPricer(address pricer, bool authorized) external onlyOwner {
+        authorizedPricers[pricer] = authorized;
+        emit PricerAuthorized(pricer, authorized);
+    }
+
+    function setAuthorizedCaller(address caller, bool authorized) external onlyOwner {
+        authorizedCallers[caller] = authorized;
+        emit CallerAuthorized(caller, authorized);
     }
 
     function clearTokenPrice(address token) external onlyOwner {
@@ -64,7 +78,20 @@ contract TokenRouterUpgradeable is Initializable, OwnableUpgradeable, UUPSUpgrad
         emit PriceUpdated(token, 0);
     }
 
-    function setTokenPricesBatch(address[] calldata tokens, uint256[] calldata prices) external onlyOwner {
+    function setDecimalOverride(address token, uint8 dec) external onlyOwner {
+        decimalOverride[token] = dec;
+        hasDecimalOverride[token] = true;
+    }
+
+    // ===================== Pricing (owner or authorized pricer) =====================
+
+    function setTokenPrice(address token, uint256 priceUsd18) external onlyOwnerOrPricer {
+        require(priceUsd18 > 0, "TokenRouter: zero price");
+        tokenPrices[token] = priceUsd18;
+        emit PriceUpdated(token, priceUsd18);
+    }
+
+    function setTokenPricesBatch(address[] calldata tokens, uint256[] calldata prices) external onlyOwnerOrPricer {
         require(tokens.length == prices.length, "TokenRouter: length mismatch");
         for (uint256 i = 0; i < tokens.length; i++) {
             require(prices[i] > 0, "TokenRouter: zero price");
@@ -73,20 +100,10 @@ contract TokenRouterUpgradeable is Initializable, OwnableUpgradeable, UUPSUpgrad
         }
     }
 
-    function setPairSupported(address tokenA, address tokenB, bool supported) external onlyOwner {
+    function setPairSupported(address tokenA, address tokenB, bool supported) external onlyOwnerOrPricer {
         pairSupported[tokenA][tokenB] = supported;
         pairSupported[tokenB][tokenA] = supported;
         emit PairUpdated(tokenA, tokenB, supported);
-    }
-
-    function setAuthorizedCaller(address caller, bool authorized) external onlyOwner {
-        authorizedCallers[caller] = authorized;
-        emit CallerAuthorized(caller, authorized);
-    }
-
-    function setDecimalOverride(address token, uint8 dec) external onlyOwner {
-        decimalOverride[token] = dec;
-        hasDecimalOverride[token] = true;
     }
 
     // ===================== Swap =====================
@@ -167,5 +184,5 @@ contract TokenRouterUpgradeable is Initializable, OwnableUpgradeable, UUPSUpgrad
 
     function _authorizeUpgrade(address) internal override onlyOwner {}
 
-    uint256[43] private __gap;
+    uint256[42] private __gap;
 }
