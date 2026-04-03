@@ -11,6 +11,9 @@ broadcast/
 # Dependencies
 lib/
 
+# Local-only ops scripts (not tracked)
+script/MintTiltUSDCTo.s.sol
+
 # IDE
 .vscode/
 .idea/
