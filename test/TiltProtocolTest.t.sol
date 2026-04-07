@@ -807,6 +807,60 @@ contract TiltProtocolTest is Test {
         vault.executeTrade(address(aapl), address(usdc), aaplBal / 2, 0);
     }
 
+    // ===================== Allocation Truncation Regression =====================
+
+    /// @notice Regression: a deposit much larger than the existing portfolio must
+    ///         allocate proportionally across ALL target tokens. Before the fix,
+    ///         getCurrentWeights() truncated small positions to 0 bps via uint16
+    ///         (tokenValue * 10000 / inflatedTotalAssets → 0), concentrating the
+    ///         entire deposit into whichever token was largest — or allocating
+    ///         nothing at all when every position truncated to zero.
+    function test_allocateUnallocated_largeDeposit_noWeightTruncation() public {
+        address vaultAddr = _createUserVault();
+        UserVault vault = UserVault(vaultAddr);
+
+        // Allocate the 1000 USDC seed into AAPL (60%) + MSFT (40%)
+        vault.allocateIdleAssets();
+
+        uint256 aaplBefore = aapl.balanceOf(vaultAddr);
+        uint256 msftBefore = msft.balanceOf(vaultAddr);
+        assertTrue(aaplBefore > 0, "vault should hold AAPL after seed");
+        assertTrue(msftBefore > 0, "vault should hold MSFT after seed");
+
+        // 10M USDC — 10,000x the seed.  With uint16 getCurrentWeights(),
+        // both positions (~$600 AAPL, ~$400 MSFT) would truncate to 0 bps
+        // against a $10M+ totalAssets denominator.
+        uint256 largeDeposit = 10_000_000e6;
+        usdc.mint(alice, largeDeposit);
+
+        vm.startPrank(alice);
+        usdc.approve(vaultAddr, largeDeposit);
+        vault.depositAndAllocate(largeDeposit, alice);
+        vm.stopPrank();
+
+        assertTrue(
+            aapl.balanceOf(vaultAddr) > aaplBefore,
+            "AAPL must increase after large deposit allocation"
+        );
+        assertTrue(
+            msft.balanceOf(vaultAddr) > msftBefore,
+            "MSFT must increase after large deposit allocation"
+        );
+
+        // Verify proportions roughly match target weights (60/40 ± 5%)
+        uint256 newAaplUsdc = router.getQuote(
+            address(aapl), address(usdc), aapl.balanceOf(vaultAddr) - aaplBefore
+        );
+        uint256 newMsftUsdc = router.getQuote(
+            address(msft), address(usdc), msft.balanceOf(vaultAddr) - msftBefore
+        );
+        uint256 totalNew = newAaplUsdc + newMsftUsdc;
+
+        uint256 aaplPct = (newAaplUsdc * 10000) / totalNew;
+        assertGt(aaplPct, 5500, "AAPL should be ~60% of new allocation");
+        assertLt(aaplPct, 6500, "AAPL should be ~60% of new allocation");
+    }
+
     // ===================== Helpers =====================
 
     function _createUserVault() internal returns (address vault) {

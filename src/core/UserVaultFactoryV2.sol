@@ -43,6 +43,7 @@ contract UserVaultFactoryV2 is Initializable, OwnableUpgradeable, UUPSUpgradeabl
     // V2 additions
     mapping(address => mapping(string => bool)) public hasCreatedSymbol;
     address public tradeDelegateProxy;
+    mapping(string => bool) public symbolExists;
 
     event UserVaultCreated(address indexed vault, address indexed curator, string name, string symbol);
     event TokenApprovalUpdated(address indexed token, bool approved);
@@ -91,13 +92,21 @@ contract UserVaultFactoryV2 is Initializable, OwnableUpgradeable, UUPSUpgradeabl
         tokenRouter = _tokenRouter;
         tradeDelegateProxy = _tradeDelegateProxy;
         
-        vaultCreationFee = 0.01 ether;
+        vaultCreationFee = 0;
         minSeedDeposit = 100e6;
         defaultTimeLock = 24 hours;
         defaultMinRebalanceInterval = 4 hours;
     }
 
     function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    function upgradeImplementation(address newImplementation) external onlyOwner {
+        beacon.upgradeTo(newImplementation);
+    }
+
+    function implementation() external view returns (address) {
+        return beacon.implementation();
+    }
 
     function setTradeDelegateProxy(address _proxy) external onlyOwner {
         tradeDelegateProxy = _proxy;
@@ -195,7 +204,7 @@ contract UserVaultFactoryV2 is Initializable, OwnableUpgradeable, UUPSUpgradeabl
     ) internal returns (address vault) {
         if (msg.value < vaultCreationFee) revert InsufficientCreationFee();
         if (seedDeposit < minSeedDeposit) revert InsufficientSeedDeposit();
-        if (hasCreatedSymbol[msg.sender][symbol]) revert DuplicateSymbol();
+        if (symbolExists[symbol]) revert DuplicateSymbol();
 
         require(tokens.length == weights.length, "UVF2: length mismatch");
         require(tokens.length > 0, "UVF2: empty portfolio");
@@ -240,6 +249,7 @@ contract UserVaultFactoryV2 is Initializable, OwnableUpgradeable, UUPSUpgradeabl
         UserVault(vault).transferCurator(msg.sender);
 
         hasCreatedSymbol[msg.sender][symbol] = true;
+        symbolExists[symbol] = true;
         allVaults.push(vault);
         isVault[vault] = true;
 

@@ -375,10 +375,17 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
     }
 
     /// @dev Core allocation logic: buys proportionally into the portfolio's
-    ///      current composition using only `unallocatedDeposits`. Never sells
+    ///      target composition using only `unallocatedDeposits`. Never sells
     ///      existing positions, never touches intentional cash held by the
-    ///      fund manager. Falls back to target weights for the first allocation
-    ///      (empty portfolio after vault creation).
+    ///      fund manager.
+    ///
+    ///      Uses target weights (the curator's intended allocation) rather than
+    ///      current weights to avoid uint16 precision loss: a large deposit
+    ///      inflates totalAssets with USDC, shrinking every token's weight in
+    ///      getCurrentWeights() toward zero and concentrating the allocation
+    ///      into whichever position is large enough to survive truncation.
+    ///      Target weights are stored in BPS independent of absolute values
+    ///      and are immune to this distortion.
     function _allocateUnallocated() internal {
         if (unallocatedDeposits == 0) return;
         if (address(rebalanceEngine) == address(0)) return;
@@ -388,9 +395,9 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
         uint256 allocatable = unallocatedDeposits < actualBase ? unallocatedDeposits : actualBase;
         if (allocatable == 0) return;
 
-        IBaseVault.TokenWeight[] memory weights = this.getCurrentWeights();
+        IBaseVault.TokenWeight[] memory weights = _getTargetWeights();
         if (weights.length == 0) {
-            weights = _getTargetWeights();
+            weights = this.getCurrentWeights();
         }
         if (weights.length == 0) return;
 
