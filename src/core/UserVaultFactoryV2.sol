@@ -63,6 +63,12 @@ contract UserVaultFactoryV2 is Initializable, OwnableUpgradeable, UUPSUpgradeabl
     error InvalidWeights();
     error DuplicateToken();
     error DuplicateSymbol();
+    /// @notice The rebalance engine is configured with a different token router
+    ///         than this factory. Allowing vault creation in that state would
+    ///         silently produce vaults whose `allocateIdleAssets()` /
+    ///         `executeRebalance()` always revert with `UnsupportedPair()` because
+    ///         the swap path goes through the engine's router, not the vault's.
+    error RouterDrift();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -209,6 +215,15 @@ contract UserVaultFactoryV2 is Initializable, OwnableUpgradeable, UUPSUpgradeabl
         if (seedDeposit < minSeedDeposit) revert InsufficientSeedDeposit();
         if (symbolExists[symbol]) revert DuplicateSymbol();
 
+        // Structural safety: the rebalance engine executes all swaps through
+        // its own token router, not the one we pass to the vault. If they ever
+        // diverge, every vault created here would be born broken — idle USDC
+        // can never be allocated because the engine's router doesn't know
+        // about the vault's pairs. Fail loudly at creation time instead.
+        if (address(RebalanceEngine(rebalanceEngine).tokenRouter()) != tokenRouter) {
+            revert RouterDrift();
+        }
+
         require(tokens.length == weights.length, "UVF2: length mismatch");
         require(tokens.length > 0, "UVF2: empty portfolio");
 
@@ -322,10 +337,31 @@ contract UserVaultFactoryV2 is Initializable, OwnableUpgradeable, UUPSUpgradeabl
 
     /// @notice Update the token router address used when initialising new
     ///         vaults. Existing vaults continue to use their own router.
+    ///         Note: this only updates the factory's copy. For vault creation
+    ///         to keep working the RebalanceEngine must also point at
+    ///         `_router` (see `RouterDrift`). If the engine's owner is this
+    ///         factory, call `syncRebalanceEngineRouter()` to propagate;
+    ///         otherwise the engine's owner must call `setRouter` separately.
     function setTokenRouter(address _router) external onlyOwner {
         require(_router != address(0), "UVF2: zero router");
         tokenRouter = _router;
         emit TokenRouterUpdated(_router);
+    }
+
+    /// @notice Best-effort one-call heal: push the factory's current
+    ///         `tokenRouter` into the `RebalanceEngine` so the two can never
+    ///         drift. Only usable when this factory owns the engine — that
+    ///         keeps access control clean. Reverts with the engine's own
+    ///         error (`OwnableUnauthorizedAccount`) otherwise, which is the
+    ///         signal to run the ops migration path instead.
+    function syncRebalanceEngineRouter() external onlyOwner {
+        RebalanceEngine(rebalanceEngine).setRouter(tokenRouter);
+    }
+
+    /// @notice View helper: true iff the engine's router matches the
+    ///         factory's router (i.e. vault creation will succeed).
+    function isRouterAligned() external view returns (bool) {
+        return address(RebalanceEngine(rebalanceEngine).tokenRouter()) == tokenRouter;
     }
 
     function setDefaultTimeLock(uint256 _timeLock) external onlyOwner {
