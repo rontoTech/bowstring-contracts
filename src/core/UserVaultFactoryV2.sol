@@ -53,6 +53,9 @@ contract UserVaultFactoryV2 is Initializable, OwnableUpgradeable, UUPSUpgradeabl
     event DefaultTimeLockUpdated(uint256 newTimeLock);
     event DefaultRebalanceIntervalUpdated(uint256 newInterval);
     event TradeDelegateProxyUpdated(address indexed proxy);
+    event FeeManagerUpdated(address indexed newFeeManager);
+    event RegistryUpdated(address indexed newRegistry);
+    event TokenRouterUpdated(address indexed newRouter);
 
     error InsufficientCreationFee();
     error InsufficientSeedDeposit();
@@ -294,6 +297,35 @@ contract UserVaultFactoryV2 is Initializable, OwnableUpgradeable, UUPSUpgradeabl
     function setRebalanceEngine(address _engine) external onlyOwner {
         rebalanceEngine = _engine;
         emit RebalanceEngineUpdated(_engine);
+    }
+
+    /// @notice Repoint the factory at a new FeeManager (e.g. after a
+    ///         non-upgradeable FeeManager had to be replaced). New vaults
+    ///         created after this call will be configured on the new
+    ///         FeeManager. Existing vaults keep pointing at whichever
+    ///         FeeManager they were initialised with until their owner calls
+    ///         `UserVault.setFeeManager` directly.
+    function setFeeManager(address _feeManager) external onlyOwner {
+        require(_feeManager != address(0), "UVF2: zero fee manager");
+        feeManager = FeeManager(payable(_feeManager));
+        emit FeeManagerUpdated(_feeManager);
+    }
+
+    /// @notice Repoint the factory at a new VaultRegistry. Mirrors
+    ///         `setFeeManager` — useful when an existing registry has to be
+    ///         replaced (e.g. migration from non-upgradeable to upgradeable).
+    function setRegistry(address _registry) external onlyOwner {
+        require(_registry != address(0), "UVF2: zero registry");
+        registry = VaultRegistry(_registry);
+        emit RegistryUpdated(_registry);
+    }
+
+    /// @notice Update the token router address used when initialising new
+    ///         vaults. Existing vaults continue to use their own router.
+    function setTokenRouter(address _router) external onlyOwner {
+        require(_router != address(0), "UVF2: zero router");
+        tokenRouter = _router;
+        emit TokenRouterUpdated(_router);
     }
 
     function setDefaultTimeLock(uint256 _timeLock) external onlyOwner {
