@@ -807,6 +807,79 @@ contract TiltProtocolTest is Test {
         vault.executeTrade(address(aapl), address(usdc), aaplBal / 2, 0);
     }
 
+    // ===================== Whole Shares Only Tests =====================
+
+    function test_wholeSharesOnly_setter_onlyCurator() public {
+        address vaultAddr = _createUserVault();
+        UserVault vault = UserVault(vaultAddr);
+
+        vm.prank(alice);
+        vm.expectRevert(UserVault.OnlyCurator.selector);
+        vault.setWholeSharesOnly(true);
+
+        vm.prank(curator);
+        vault.setWholeSharesOnly(true);
+        assertTrue(vault.wholeSharesOnly());
+    }
+
+    function test_sweepFractionalPositions_sellsFractionalRemainders() public {
+        address vaultAddr = _createUserVault();
+        UserVault vault = UserVault(vaultAddr);
+
+        vault.allocateIdleAssets();
+
+        uint256 aaplBefore = aapl.balanceOf(vaultAddr);
+        assertGt(aaplBefore % 1e18, 0, "fixture should create fractional AAPL");
+
+        vm.prank(curator);
+        vault.setWholeSharesOnly(true);
+
+        vm.prank(curator);
+        vault.sweepFractionalPositions();
+
+        assertEq(aapl.balanceOf(vaultAddr) % 1e18, 0, "AAPL should be rounded to whole shares");
+        assertEq(msft.balanceOf(vaultAddr) % 1e18, 0, "MSFT should be rounded to whole shares");
+        assertGt(usdc.balanceOf(vaultAddr), 0, "fractional remainders should return USDC");
+    }
+
+    function test_sweepFractionalPositions_skipsNearWholeBalances() public {
+        address vaultAddr = _createUserVault();
+        UserVault vault = UserVault(vaultAddr);
+
+        vault.allocateIdleAssets();
+        uint256 targetAapl = 11e18 + 999_500_000_000_000_000; // 11.9995 shares
+        uint256 aaplBalance = aapl.balanceOf(vaultAddr);
+        if (aaplBalance < targetAapl) {
+            aapl.mint(vaultAddr, targetAapl - aaplBalance);
+        }
+
+        vm.prank(curator);
+        vault.setWholeSharesOnly(true);
+
+        vm.prank(curator);
+        vault.sweepFractionalPositions();
+
+        assertEq(aapl.balanceOf(vaultAddr), targetAapl, "near-whole AAPL should not be rounded down");
+    }
+
+    function test_sweepFractionalPositions_delegateCanSweep() public {
+        address vaultAddr = _createUserVault();
+        UserVault vault = UserVault(vaultAddr);
+        address delegate = makeAddr("sweepDelegate");
+
+        vault.allocateIdleAssets();
+
+        vm.startPrank(curator);
+        vault.setWholeSharesOnly(true);
+        vault.setDelegate(delegate, true);
+        vm.stopPrank();
+
+        vm.prank(delegate);
+        vault.sweepFractionalPositions();
+
+        assertEq(aapl.balanceOf(vaultAddr) % 1e18, 0, "delegate sweep should round AAPL");
+    }
+
     // ===================== Allocation Truncation Regression =====================
 
     /// @notice Regression: a deposit much larger than the existing portfolio must

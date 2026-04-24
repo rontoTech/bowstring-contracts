@@ -53,6 +53,8 @@ contract UserVault is BaseVault {
     event ConfigChangeApplied(bytes32 indexed configKey, address newValue);
     event ConfigChangeCancelled(bytes32 indexed configKey);
     event DelegateUpdated(address indexed delegate, bool authorized);
+    event WholeSharesOnlyUpdated(bool enabled);
+    event FractionalPositionSwept(address indexed token, uint256 amountIn, uint256 amountOutMin);
 
     // --- Errors ---
     error OnlyCurator();
@@ -262,6 +264,11 @@ contract UserVault is BaseVault {
     // --- Delegate trading (added for API-driven execution) ---
     mapping(address => bool) public delegates;
 
+    // --- Whole share mode ---
+    bool public wholeSharesOnly;
+    uint256 public constant WHOLE_SHARE_UNIT = 1e18;
+    uint256 public constant WHOLE_SHARE_SNAP_THRESHOLD = 1e15; // 0.001 shares
+
     function setWithdrawalSlippage(uint256 _slippageBps) external override onlyCurator {
         require(_slippageBps <= 1000, "UserVault: slippage too high");
         if (weightChangeTimeLock == 0) {
@@ -293,6 +300,13 @@ contract UserVault is BaseVault {
         require(delegate != address(0), "UserVault: zero delegate");
         delegates[delegate] = authorized;
         emit DelegateUpdated(delegate, authorized);
+    }
+
+    /// @notice Enable or disable whole-share cleanup mode for API-managed vaults.
+    ///         This mode is opt-in because fractional shares provide better capital efficiency.
+    function setWholeSharesOnly(bool enabled) external onlyCurator {
+        wholeSharesOnly = enabled;
+        emit WholeSharesOnlyUpdated(enabled);
     }
 
     // ===================== Trading =====================
@@ -331,15 +345,49 @@ contract UserVault is BaseVault {
             isHeldToken[tokenOut] = true;
         }
 
-        // Sync target weights to actual portfolio (used as first-allocation
-        // fallback when _allocateUnallocated sees an empty getCurrentWeights)
-        IBaseVault.TokenWeight[] memory current = this.getCurrentWeights();
-        delete _targetWeights;
-        for (uint256 i = 0; i < current.length; i++) {
-            if (current[i].weightBps > 0) {
-                _targetWeights.push(current[i]);
-            }
+        _syncTargetWeightsToCurrent();
+    }
+
+    /// @notice Sell fractional stock-token remainders back to the base asset.
+    ///         Near-whole balances within WHOLE_SHARE_SNAP_THRESHOLD are left
+    ///         untouched to avoid turning 11.999999 shares into 11 shares.
+    function sweepFractionalPositions() external onlyCuratorOrDelegate nonReentrant whenNotPaused {
+        require(wholeSharesOnly, "UserVault: whole shares disabled");
+        require(address(rebalanceEngine) != address(0), "UserVault: no engine");
+        require(address(tokenRouter) != address(0), "UserVault: no router");
+
+        _accrueManagementFee();
+
+        address[] memory tokens = heldTokens;
+        for (uint256 i = 0; i < tokens.length; i++) {
+            address token = tokens[i];
+            if (token == address(baseAsset)) continue;
+
+            uint256 balance = IERC20(token).balanceOf(address(this));
+            uint256 remainder = balance % WHOLE_SHARE_UNIT;
+            if (remainder == 0) continue;
+            if (WHOLE_SHARE_UNIT - remainder <= WHOLE_SHARE_SNAP_THRESHOLD) continue;
+
+            uint256 expectedOut = tokenRouter.getQuote(token, address(baseAsset), remainder);
+            uint256 minOut = (expectedOut * (10000 - withdrawalSlippageBps)) / 10000;
+
+            IERC20(token).forceApprove(address(rebalanceEngine), remainder);
+
+            IRebalanceEngine.TradeOrder[] memory trades = new IRebalanceEngine.TradeOrder[](1);
+            trades[0] = IRebalanceEngine.TradeOrder({
+                tokenIn: token,
+                tokenOut: address(baseAsset),
+                amountIn: remainder,
+                minAmountOut: minOut
+            });
+
+            rebalanceEngine.executeRebalance(address(this), trades);
+            IERC20(token).forceApprove(address(rebalanceEngine), 0);
+
+            emit FractionalPositionSwept(token, remainder, minOut);
         }
+
+        _syncTargetWeightsToCurrent();
     }
 
     // ===================== Emergency =====================
@@ -407,6 +455,18 @@ contract UserVault is BaseVault {
 
     function _getTargetWeights() internal view override returns (IBaseVault.TokenWeight[] memory) {
         return _targetWeights;
+    }
+
+    function _syncTargetWeightsToCurrent() internal {
+        // Sync target weights to actual portfolio (used as first-allocation
+        // fallback when _allocateUnallocated sees an empty getCurrentWeights).
+        IBaseVault.TokenWeight[] memory current = this.getCurrentWeights();
+        delete _targetWeights;
+        for (uint256 i = 0; i < current.length; i++) {
+            if (current[i].weightBps > 0) {
+                _targetWeights.push(current[i]);
+            }
+        }
     }
 
     function getApprovedTokens() external view returns (address[] memory) {
