@@ -25,6 +25,14 @@ contract UserVault is BaseVault {
     IBaseVault.TokenWeight[] private _targetWeights;
 
     uint256 public weightChangeTimeLock; // used for config change time-locks
+
+    /// @notice Minimum delay enforced on CURATOR-initiated critical config changes
+    ///         (rebalance engine, token router, base asset), regardless of
+    ///         weightChangeTimeLock. A curator can set weightChangeTimeLock to 0 for
+    ///         fast iteration, but must never be able to instantly repoint the vault
+    ///         at a hostile engine/router/asset and drain principal in one block.
+    ///         The protocol admin (feeManager.owner) is exempt for infra upgrades.
+    uint256 public constant MIN_CONFIG_TIMELOCK = 24 hours;
     uint256 private __deprecated_pendingWeightChangeTime;
     IBaseVault.TokenWeight[] private __deprecated_pendingWeights;
     bool private __deprecated_hasPendingWeights;
@@ -149,16 +157,19 @@ contract UserVault is BaseVault {
         if (!isCurator && !isProtocolAdmin) revert OnlyCurator();
 
         require(_engine != address(0), "UserVault: zero engine");
-        if (weightChangeTimeLock == 0 || isProtocolAdmin) {
+        // Protocol admin may apply infra changes immediately; curators are always
+        // delayed by at least MIN_CONFIG_TIMELOCK (see constant).
+        if (isProtocolAdmin) {
             rebalanceEngine = IRebalanceEngine(_engine);
             emit ConfigChangeApplied("rebalanceEngine", _engine);
         } else {
+            uint256 effectiveTime = block.timestamp + _curatorConfigDelay();
             pendingRebalanceEngine = PendingAddress({
                 value: _engine,
-                effectiveTime: block.timestamp + weightChangeTimeLock,
+                effectiveTime: effectiveTime,
                 pending: true
             });
-            emit ConfigChangeProposed("rebalanceEngine", _engine, pendingRebalanceEngine.effectiveTime);
+            emit ConfigChangeProposed("rebalanceEngine", _engine, effectiveTime);
         }
     }
 
@@ -179,16 +190,19 @@ contract UserVault is BaseVault {
         if (!isCurator && !isProtocolAdmin) revert OnlyCurator();
 
         require(_router != address(0), "UserVault: zero router");
-        if (weightChangeTimeLock == 0 || isProtocolAdmin) {
+        // Protocol admin may apply infra changes immediately; curators are always
+        // delayed by at least MIN_CONFIG_TIMELOCK (see constant).
+        if (isProtocolAdmin) {
             tokenRouter = ITokenRouter(_router);
             emit ConfigChangeApplied("tokenRouter", _router);
         } else {
+            uint256 effectiveTime = block.timestamp + _curatorConfigDelay();
             pendingTokenRouter = PendingAddress({
                 value: _router,
-                effectiveTime: block.timestamp + weightChangeTimeLock,
+                effectiveTime: effectiveTime,
                 pending: true
             });
-            emit ConfigChangeProposed("tokenRouter", _router, pendingTokenRouter.effectiveTime);
+            emit ConfigChangeProposed("tokenRouter", _router, effectiveTime);
         }
     }
 
@@ -204,18 +218,15 @@ contract UserVault is BaseVault {
     /// @notice Propose a new base asset (time-locked)
     function setBaseAsset(address _baseAsset) external override onlyCurator {
         require(_baseAsset != address(0), "UserVault: zero base asset");
-        if (weightChangeTimeLock == 0) {
-            address old = address(baseAsset);
-            baseAsset = IERC20(_baseAsset);
-            emit BaseAssetUpdated(old, _baseAsset);
-        } else {
-            pendingBaseAsset = PendingAddress({
-                value: _baseAsset,
-                effectiveTime: block.timestamp + weightChangeTimeLock,
-                pending: true
-            });
-            emit ConfigChangeProposed("baseAsset", _baseAsset, pendingBaseAsset.effectiveTime);
-        }
+        // The base asset is the depositor's unit of account; a curator must never be
+        // able to swap it out instantly. Always enforce at least MIN_CONFIG_TIMELOCK.
+        uint256 effectiveTime = block.timestamp + _curatorConfigDelay();
+        pendingBaseAsset = PendingAddress({
+            value: _baseAsset,
+            effectiveTime: effectiveTime,
+            pending: true
+        });
+        emit ConfigChangeProposed("baseAsset", _baseAsset, effectiveTime);
     }
 
     /// @notice Apply pending base asset after time-lock
@@ -326,7 +337,9 @@ contract UserVault is BaseVault {
 
         _accrueManagementFee();
 
-        IERC20(tokenIn).forceApprove(address(rebalanceEngine), type(uint256).max);
+        // Approve exactly what the engine will pull (it transfers amountIn), not an
+        // unbounded max — minimizes the blast radius if the engine is ever hostile.
+        IERC20(tokenIn).forceApprove(address(rebalanceEngine), amountIn);
 
         IRebalanceEngine.TradeOrder[] memory trades = new IRebalanceEngine.TradeOrder[](1);
         trades[0] = IRebalanceEngine.TradeOrder({
@@ -452,6 +465,12 @@ contract UserVault is BaseVault {
     }
 
     // ===================== Internal =====================
+
+    /// @dev Effective delay for curator-initiated critical config changes:
+    ///      never shorter than MIN_CONFIG_TIMELOCK even if weightChangeTimeLock is 0.
+    function _curatorConfigDelay() internal view returns (uint256) {
+        return weightChangeTimeLock < MIN_CONFIG_TIMELOCK ? MIN_CONFIG_TIMELOCK : weightChangeTimeLock;
+    }
 
     function _getTargetWeights() internal view override returns (IBaseVault.TokenWeight[] memory) {
         return _targetWeights;

@@ -210,6 +210,8 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
         // Transfer net assets to receiver
         baseAsset.safeTransfer(receiver, netAssets);
 
+        _reconcileUnallocated();
+
         emit Withdrawn(receiver, assets, shares);
     }
 
@@ -248,6 +250,8 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
         }
 
         baseAsset.safeTransfer(receiver, netAssets);
+
+        _reconcileUnallocated();
 
         emit Withdrawn(receiver, assets, shares);
     }
@@ -288,6 +292,8 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
                 }
             }
         }
+
+        _reconcileUnallocated();
 
         emit EmergencyWithdrawn(msg.sender, shares);
     }
@@ -448,6 +454,17 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
         _updateHeldTokens(weights);
 
         emit IdleAssetsAllocated(allocatable, tradeCount, block.timestamp);
+    }
+
+    /// @dev Clamp the unallocated-deposit counter to the actual base balance.
+    ///      Called after every base-asset outflow (withdraw/redeem/emergency) so
+    ///      the counter never overstates idle deposit inflow and allocateIdleAssets
+    ///      cannot sweep intentional manager cash that was never a deposit.
+    function _reconcileUnallocated() internal {
+        uint256 bal = baseAsset.balanceOf(address(this));
+        if (unallocatedDeposits > bal) {
+            unallocatedDeposits = bal;
+        }
     }
 
     // ===================== Price Oracle / NAV =====================
