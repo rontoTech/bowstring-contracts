@@ -51,6 +51,7 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
     event IdleAssetsAllocated(uint256 baseAllocated, uint256 tradeCount, uint256 timestamp);
     event BaseAssetUpdated(address indexed oldAsset, address indexed newAsset);
     event FeeSharesMinted(uint256 feeShares, address indexed recipient);
+    event FeesAccrued(uint256 managementFeeShares, uint256 performanceFeeShares);
     event WithdrawalSlippageUpdated(uint256 newSlippageBps);
 
     // --- Constants ---
@@ -183,21 +184,22 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
 
         _accrueManagementFee();
 
+        // `assets` is the net amount the receiver gets. Gross up for the exit
+        // fee before burning shares so the emitted cashflow matches funds sent.
+        uint256 exitFeeBps = feeManager.getExitFee(address(this));
+        uint256 grossAssets = _grossUpForExitFee(assets, exitFeeBps);
+        uint256 feeAmount = grossAssets - assets;
+
         // Round shares UP to protect vault (ERC-4626 best practice)
-        shares = _convertToSharesCeil(assets);
+        shares = _convertToSharesCeil(grossAssets);
         require(shares > 0, "BaseVault: zero shares");
 
         if (msg.sender != owner) {
             _spendAllowance(owner, msg.sender, shares);
         }
 
-        // Charge exit fee on the gross amount
-        uint256 exitFeeBps = feeManager.getExitFee(address(this));
-        uint256 feeAmount = (assets * exitFeeBps) / 10000;
-        uint256 netAssets = assets - feeAmount;
-
         // Ensure enough base asset liquidity
-        _ensureBaseLiquidity(assets);
+        _ensureBaseLiquidity(grossAssets);
 
         _burn(owner, shares);
 
@@ -207,8 +209,7 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
             feeManager.recordFees(feeAmount);
         }
 
-        // Transfer net assets to receiver
-        baseAsset.safeTransfer(receiver, netAssets);
+        baseAsset.safeTransfer(receiver, assets);
 
         _reconcileUnallocated();
 
@@ -231,16 +232,16 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
             _spendAllowance(owner, msg.sender, shares);
         }
 
-        assets = _convertToAssets(shares);
-        require(assets > 0, "BaseVault: zero assets");
+        uint256 grossAssets = _convertToAssets(shares);
+        require(grossAssets > 0, "BaseVault: zero assets");
 
         // Charge exit fee
         uint256 exitFeeBps = feeManager.getExitFee(address(this));
-        uint256 feeAmount = (assets * exitFeeBps) / 10000;
-        uint256 netAssets = assets - feeAmount;
+        uint256 feeAmount = (grossAssets * exitFeeBps) / 10000;
+        assets = grossAssets - feeAmount;
 
         // Ensure enough base asset liquidity
-        _ensureBaseLiquidity(assets);
+        _ensureBaseLiquidity(grossAssets);
 
         _burn(owner, shares);
 
@@ -249,7 +250,7 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
             feeManager.recordFees(feeAmount);
         }
 
-        baseAsset.safeTransfer(receiver, netAssets);
+        baseAsset.safeTransfer(receiver, assets);
 
         _reconcileUnallocated();
 
@@ -352,6 +353,12 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
 
     function accruedFees() external view returns (uint256) {
         return _pendingManagementFeeShares() + _pendingPerformanceFeeShares();
+    }
+
+    /// @notice Materialize pending management/performance fee shares without
+    ///         requiring a deposit, withdrawal, or trade to be the trigger.
+    function accrueFees() external nonReentrant returns (uint256 feeShares) {
+        feeShares = _accrueManagementFee();
     }
 
     function getHeldTokens() external view returns (address[] memory) {
@@ -603,25 +610,26 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
     /// @notice Accrue management and performance fees via share dilution.
     ///         Fee shares are minted directly to protocol treasury and curator.
     ///         HWM is captured BEFORE dilution to avoid double-charging performance fees.
-    function _accrueManagementFee() internal {
+    function _accrueManagementFee() internal returns (uint256 totalFeeShares) {
         if (totalSupply() == 0) {
             lastFeeAccrualTimestamp = block.timestamp;
-            return;
+            return 0;
         }
 
         uint256 mgmtShares = _pendingManagementFeeShares();
         uint256 perfShares = _pendingPerformanceFeeShares();
-        uint256 totalFeeShares = mgmtShares + perfShares;
+        totalFeeShares = mgmtShares + perfShares;
 
         // Capture share price BEFORE minting fee shares (pre-dilution)
         // This ensures HWM reflects the true performance, not the diluted price.
-        uint256 preDilutionPrice = _sharePrice();
+        uint256 preDilutionPrice = _rawSharePrice();
         if (preDilutionPrice > highWaterMark) {
             highWaterMark = preDilutionPrice;
         }
 
         if (totalFeeShares > 0) {
             _mintFeeShares(totalFeeShares);
+            emit FeesAccrued(mgmtShares, perfShares);
         }
 
         lastFeeAccrualTimestamp = block.timestamp;
@@ -638,8 +646,12 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
         uint16 mgmtFeeBps = feeManager.getManagementFee(address(this));
         if (mgmtFeeBps == 0) return 0;
 
-        // Annualized fee prorated: shares = supply * feeBps * elapsed / (BPS * 365 days)
-        return (supply * mgmtFeeBps * elapsed) / (10000 * 365 days);
+        // Mint enough shares so the recipient owns exactly the prorated fee
+        // fraction of post-fee supply: x / (S + x) = feeFraction.
+        uint256 feeTime = uint256(mgmtFeeBps) * elapsed;
+        uint256 denominator = 10000 * 365 days;
+        if (feeTime >= denominator) return supply;
+        return supply.mulDiv(feeTime, denominator - feeTime, Math.Rounding.Floor);
     }
 
     /// @notice Calculate pending performance fee as share count
@@ -647,15 +659,19 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
         uint256 supply = totalSupply();
         if (supply == 0) return 0;
 
-        uint256 currentPrice = _sharePrice();
+        uint256 currentPrice = _rawSharePrice();
         if (currentPrice <= highWaterMark) return 0;
 
         uint16 perfFeeBps = feeManager.getPerformanceFee(address(this));
         if (perfFeeBps == 0) return 0;
 
-        // Performance fee on profit above high-water mark
+        // Mint enough shares so the recipient owns exactly the performance fee
+        // fraction of post-fee supply.
         uint256 profit = currentPrice - highWaterMark;
-        return (supply * profit * perfFeeBps) / (currentPrice * 10000);
+        uint256 feeNumerator = profit * uint256(perfFeeBps);
+        uint256 grossDenominator = currentPrice * 10000;
+        if (feeNumerator >= grossDenominator) return supply;
+        return supply.mulDiv(feeNumerator, grossDenominator - feeNumerator, Math.Rounding.Floor);
     }
 
     /// @notice Mint fee shares, split between protocol treasury and curator
@@ -684,7 +700,7 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
 
     /// @dev Convert assets to shares (rounds DOWN — favors vault on deposits)
     function _convertToShares(uint256 assets) internal view returns (uint256) {
-        uint256 supply = totalSupply();
+        uint256 supply = _effectiveTotalSupply();
         uint256 total = _totalAssets();
         if (supply == 0 || total == 0) {
             return assets; // 1:1 for first deposit
@@ -694,7 +710,7 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
 
     /// @dev Convert assets to shares (rounds UP — used for withdrawals to protect vault)
     function _convertToSharesCeil(uint256 assets) internal view returns (uint256) {
-        uint256 supply = totalSupply();
+        uint256 supply = _effectiveTotalSupply();
         uint256 total = _totalAssets();
         if (supply == 0 || total == 0) {
             return assets; // 1:1
@@ -704,7 +720,7 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
 
     /// @dev Convert shares to assets (rounds DOWN — favors vault on redemptions)
     function _convertToAssets(uint256 shares) internal view returns (uint256) {
-        uint256 supply = totalSupply();
+        uint256 supply = _effectiveTotalSupply();
         uint256 total = _totalAssets();
         if (supply == 0 || total == 0) {
             return shares; // 1:1
@@ -714,8 +730,29 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
 
     /// @dev Share price with full mulDiv precision (18 decimals)
     function _sharePrice() internal view returns (uint256) {
-        if (totalSupply() == 0) return 1e18;
-        return _totalAssets().mulDiv(1e18, totalSupply(), Math.Rounding.Floor);
+        uint256 supply = _effectiveTotalSupply();
+        if (supply == 0) return 1e18;
+        return _totalAssets().mulDiv(1e18, supply, Math.Rounding.Floor);
+    }
+
+    function _rawSharePrice() internal view returns (uint256) {
+        uint256 supply = totalSupply();
+        if (supply == 0) return 1e18;
+        return _totalAssets().mulDiv(1e18, supply, Math.Rounding.Floor);
+    }
+
+    function _effectiveTotalSupply() internal view returns (uint256) {
+        return totalSupply() + _pendingManagementFeeShares() + _pendingPerformanceFeeShares();
+    }
+
+    function _grossUpForExitFee(uint256 netAssets, uint256 exitFeeBps)
+        internal
+        pure
+        returns (uint256)
+    {
+        if (exitFeeBps == 0) return netAssets;
+        require(exitFeeBps < 10000, "BaseVault: invalid exit fee");
+        return netAssets.mulDiv(10000, 10000 - exitFeeBps, Math.Rounding.Ceil);
     }
 
     function _updateHeldTokens(IBaseVault.TokenWeight[] memory weights) internal {

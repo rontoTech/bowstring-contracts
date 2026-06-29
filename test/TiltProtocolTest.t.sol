@@ -289,6 +289,15 @@ contract TiltProtocolTest is Test {
         assertEq(address(vault.tokenRouter()), address(0xBEEF));
     }
 
+    function test_UserVault_baseAssetChangeDisabled() public {
+        address vaultAddr = _createUserVault();
+        UserVault vault = UserVault(vaultAddr);
+
+        vm.prank(curator);
+        vm.expectRevert(UserVault.BaseAssetChangeDisabled.selector);
+        vault.setBaseAsset(address(nvda));
+    }
+
     function test_UserVault_cancelPendingEngine() public {
         address vaultAddr = _createUserVault();
         UserVault vault = UserVault(vaultAddr);
@@ -326,6 +335,77 @@ contract TiltProtocolTest is Test {
     function test_Router_getTokenPrice() public view {
         assertEq(router.getTokenPrice(address(usdc)), 1e18);
         assertEq(router.getTokenPrice(address(aapl)), 195e18);
+    }
+
+    // ===================== Accounting Regression Tests =====================
+
+    function test_withdraw_exitFee_treatsAmountAsNetAndEmitsNetCashflow() public {
+        address vaultAddr = _createUserVault();
+        UserVault vault = UserVault(vaultAddr);
+
+        feeManager.updateVaultFees(vaultAddr, 0, 100, 0, 0); // 1% exit fee
+
+        vm.startPrank(alice);
+        usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
+        vault.deposit(DEPOSIT_AMOUNT, alice);
+
+        uint256 aliceBefore = usdc.balanceOf(alice);
+        uint256 sharesBefore = vault.balanceOf(alice);
+
+        vm.expectEmit(true, false, false, true, vaultAddr);
+        emit BaseVault.Withdrawn(alice, 990e6, 1000e6);
+        uint256 sharesBurned = vault.withdraw(990e6, alice, alice);
+        vm.stopPrank();
+
+        assertEq(sharesBurned, 1000e6, "burns gross amount in shares");
+        assertEq(sharesBefore - vault.balanceOf(alice), 1000e6, "share burn should include fee gross-up");
+        assertEq(usdc.balanceOf(alice) - aliceBefore, 990e6, "receiver gets requested net amount");
+        assertEq(usdc.balanceOf(address(feeManager)), 10e6, "fee manager receives exit fee");
+    }
+
+    function test_redeem_returnsNetAssetsAfterExitFee() public {
+        address vaultAddr = _createUserVault();
+        UserVault vault = UserVault(vaultAddr);
+
+        feeManager.updateVaultFees(vaultAddr, 0, 100, 0, 0); // 1% exit fee
+
+        vm.startPrank(alice);
+        usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
+        vault.deposit(DEPOSIT_AMOUNT, alice);
+
+        uint256 aliceBefore = usdc.balanceOf(alice);
+        uint256 assetsOut = vault.redeem(1000e6, alice, alice);
+        vm.stopPrank();
+
+        assertEq(assetsOut, 990e6, "redeem return value should be net assets");
+        assertEq(usdc.balanceOf(alice) - aliceBefore, 990e6, "USDC balance should match redeem return");
+        assertEq(usdc.balanceOf(address(feeManager)), 10e6, "fee manager receives exit fee");
+    }
+
+    function test_sharePriceReflectsPendingManagementFeeDilution() public {
+        address vaultAddr = _createUserVault();
+        UserVault vault = UserVault(vaultAddr);
+
+        feeManager.updateVaultFees(vaultAddr, 0, 0, 500, 0); // 5% annual management fee
+
+        vm.startPrank(alice);
+        usdc.approve(vaultAddr, DEPOSIT_AMOUNT);
+        vault.deposit(DEPOSIT_AMOUNT, alice);
+        vm.stopPrank();
+
+        uint256 priceBefore = vault.sharePrice();
+        vm.warp(block.timestamp + 365 days);
+
+        uint256 pendingShares = vault.accruedFees();
+        uint256 priceWithPendingFees = vault.sharePrice();
+
+        assertGt(pendingShares, 0, "management fee should accrue over time");
+        assertLt(priceWithPendingFees, priceBefore, "read-only share price should include pending dilution");
+
+        uint256 mintedShares = vault.accrueFees();
+        assertEq(mintedShares, pendingShares, "accrueFees should materialize pending shares");
+        assertEq(vault.accruedFees(), 0, "pending fees should be reset after accrual");
+        assertEq(vault.sharePrice(), priceWithPendingFees, "materializing fees should not jump share price");
     }
 
     // ===================== TiltUSDC Faucet Tests =====================

@@ -70,6 +70,7 @@ contract UserVault is BaseVault {
     error NoPendingChange();
     error TimeLockNotExpired();
     error UnauthorizedUnpause();
+    error BaseAssetChangeDisabled();
 
     modifier onlyCurator() {
         if (msg.sender != curator) revert OnlyCurator();
@@ -215,28 +216,17 @@ contract UserVault is BaseVault {
         emit ConfigChangeApplied("tokenRouter", pendingTokenRouter.value);
     }
 
-    /// @notice Propose a new base asset (time-locked)
+    /// @notice Base asset changes are disabled. The base asset is the vault's
+    ///         unit of account; changing it safely requires an explicit
+    ///         migration that transfers balances and fee-manager reserves.
     function setBaseAsset(address _baseAsset) external override onlyCurator {
-        require(_baseAsset != address(0), "UserVault: zero base asset");
-        // The base asset is the depositor's unit of account; a curator must never be
-        // able to swap it out instantly. Always enforce at least MIN_CONFIG_TIMELOCK.
-        uint256 effectiveTime = block.timestamp + _curatorConfigDelay();
-        pendingBaseAsset = PendingAddress({
-            value: _baseAsset,
-            effectiveTime: effectiveTime,
-            pending: true
-        });
-        emit ConfigChangeProposed("baseAsset", _baseAsset, effectiveTime);
+        _baseAsset;
+        revert BaseAssetChangeDisabled();
     }
 
-    /// @notice Apply pending base asset after time-lock
+    /// @notice Base asset changes are disabled.
     function applyBaseAsset() external onlyCurator {
-        if (!pendingBaseAsset.pending) revert NoPendingChange();
-        if (block.timestamp < pendingBaseAsset.effectiveTime) revert TimeLockNotExpired();
-        address old = address(baseAsset);
-        baseAsset = IERC20(pendingBaseAsset.value);
-        pendingBaseAsset.pending = false;
-        emit BaseAssetUpdated(old, pendingBaseAsset.value);
+        revert BaseAssetChangeDisabled();
     }
 
     // ===================== Cancel Pending Changes =====================

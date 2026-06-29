@@ -39,4 +39,7 @@ interface IBaseVault is IERC4626 {
 
     /// @notice Get accrued but uncollected fees
     function accruedFees() external view returns (uint256);
+
+    /// @notice Materialize pending management/performance fee shares.
+    function accrueFees() external returns (uint256 feeShares);
 }

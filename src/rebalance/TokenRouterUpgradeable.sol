@@ -16,10 +16,11 @@ interface IMintBurnable {
 }
 
 /// @title TokenRouterUpgradeable
-/// @notice UUPS-proxied hybrid router: mint/burn for stock tokens, transfer for base asset.
+/// @notice UUPS-proxied hybrid router: mint/burn for stock tokens and, when
+///         authorized, the base asset. Falls back to base-asset reserves for
+///         legacy deployments where the router is not a minter.
 ///         On swap the router burns the incoming stock token and mints the outgoing stock
-///         token (infinite liquidity). For the base asset (tiltUSDC) it uses held balances
-///         instead of mint/burn, since the existing TiltUSDC contract is kept as-is.
+///         token (infinite liquidity).
 contract TokenRouterUpgradeable is Initializable, OwnableUpgradeable, UUPSUpgradeable, ReentrancyGuard, ITokenRouter {
     using SafeERC20 for IERC20;
 
@@ -31,11 +32,14 @@ contract TokenRouterUpgradeable is Initializable, OwnableUpgradeable, UUPSUpgrad
     mapping(address => uint8) public decimalOverride;
     mapping(address => bool) public hasDecimalOverride;
     mapping(address => bool) public authorizedPricers;
+    mapping(address => uint256) public tokenPriceUpdatedAt;
+    uint256 public maxPriceAge;
 
     event PriceUpdated(address indexed token, uint256 price);
     event PairUpdated(address indexed tokenA, address indexed tokenB, bool supported);
     event CallerAuthorized(address indexed caller, bool authorized);
     event PricerAuthorized(address indexed pricer, bool authorized);
+    event MaxPriceAgeUpdated(uint256 maxPriceAge);
 
     error UnauthorizedCaller();
     error UnauthorizedPricer();
@@ -52,6 +56,7 @@ contract TokenRouterUpgradeable is Initializable, OwnableUpgradeable, UUPSUpgrad
         __Ownable_init(owner_);
         require(baseAsset_ != address(0), "TokenRouter: zero base asset");
         baseAsset = baseAsset_;
+        maxPriceAge = 7 days;
     }
 
     // ===================== Access helpers =====================
@@ -75,7 +80,16 @@ contract TokenRouterUpgradeable is Initializable, OwnableUpgradeable, UUPSUpgrad
 
     function clearTokenPrice(address token) external onlyOwner {
         delete tokenPrices[token];
+        delete tokenPriceUpdatedAt[token];
         emit PriceUpdated(token, 0);
+    }
+
+    function initializePriceFreshness(uint256 maxPriceAge_) external reinitializer(2) onlyOwner {
+        _setMaxPriceAge(maxPriceAge_);
+    }
+
+    function setMaxPriceAge(uint256 maxPriceAge_) external onlyOwner {
+        _setMaxPriceAge(maxPriceAge_);
     }
 
     function setDecimalOverride(address token, uint8 dec) external onlyOwner {
@@ -88,6 +102,7 @@ contract TokenRouterUpgradeable is Initializable, OwnableUpgradeable, UUPSUpgrad
     function setTokenPrice(address token, uint256 priceUsd18) external onlyOwnerOrPricer {
         require(priceUsd18 > 0, "TokenRouter: zero price");
         tokenPrices[token] = priceUsd18;
+        tokenPriceUpdatedAt[token] = block.timestamp;
         emit PriceUpdated(token, priceUsd18);
     }
 
@@ -96,6 +111,7 @@ contract TokenRouterUpgradeable is Initializable, OwnableUpgradeable, UUPSUpgrad
         for (uint256 i = 0; i < tokens.length; i++) {
             require(prices[i] > 0, "TokenRouter: zero price");
             tokenPrices[tokens[i]] = prices[i];
+            tokenPriceUpdatedAt[tokens[i]] = block.timestamp;
             emit PriceUpdated(tokens[i], prices[i]);
         }
     }
@@ -132,7 +148,11 @@ contract TokenRouterUpgradeable is Initializable, OwnableUpgradeable, UUPSUpgrad
         }
 
         if (tokenOut == baseAsset) {
-            IERC20(tokenOut).safeTransfer(recipient, amountOut);
+            try IMintBurnable(tokenOut).mint(recipient, amountOut) {
+                // Preferred synthetic-liquidity path.
+            } catch {
+                IERC20(tokenOut).safeTransfer(recipient, amountOut);
+            }
         } else {
             IMintBurnable(tokenOut).mint(recipient, amountOut);
         }
@@ -148,8 +168,8 @@ contract TokenRouterUpgradeable is Initializable, OwnableUpgradeable, UUPSUpgrad
         override
         returns (uint256 amountOut)
     {
-        uint256 priceIn = tokenPrices[tokenIn];
-        uint256 priceOut = tokenPrices[tokenOut];
+        uint256 priceIn = _freshPrice(tokenIn);
+        uint256 priceOut = _freshPrice(tokenOut);
         if (priceIn == 0) revert ZeroPrice();
         if (priceOut == 0) revert ZeroPrice();
 
@@ -168,7 +188,15 @@ contract TokenRouterUpgradeable is Initializable, OwnableUpgradeable, UUPSUpgrad
     }
 
     function getTokenPrice(address token) external view override returns (uint256) {
-        return tokenPrices[token];
+        return _freshPrice(token);
+    }
+
+    function isTokenPriceStale(address token) external view returns (bool) {
+        return _priceIsStale(token);
+    }
+
+    function getTokenPriceUpdatedAt(address token) external view returns (uint256) {
+        return tokenPriceUpdatedAt[token];
     }
 
     function _decimals(address token) internal view returns (uint256) {
@@ -180,9 +208,27 @@ contract TokenRouterUpgradeable is Initializable, OwnableUpgradeable, UUPSUpgrad
         }
     }
 
+    function _freshPrice(address token) internal view returns (uint256) {
+        if (_priceIsStale(token)) return 0;
+        return tokenPrices[token];
+    }
+
+    function _priceIsStale(address token) internal view returns (bool) {
+        if (maxPriceAge == 0) return false;
+        if (tokenPrices[token] == 0) return false;
+        uint256 updatedAt = tokenPriceUpdatedAt[token];
+        if (updatedAt == 0) return false;
+        return block.timestamp > updatedAt + maxPriceAge;
+    }
+
+    function _setMaxPriceAge(uint256 maxPriceAge_) internal {
+        maxPriceAge = maxPriceAge_;
+        emit MaxPriceAgeUpdated(maxPriceAge_);
+    }
+
     // ===================== UUPS =====================
 
     function _authorizeUpgrade(address) internal override onlyOwner {}
 
-    uint256[42] private __gap;
+    uint256[40] private __gap;
 }

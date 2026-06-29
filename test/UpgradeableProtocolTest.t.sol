@@ -132,7 +132,7 @@ contract UpgradeableProtocolTest is Test {
         router.setPairSupported(msft, nvda, true);
 
         // --- Router is minter on all stock tokens (set by factory) ---
-        // tiltUSDC: router uses transfer, so just fund it
+        // tiltUSDC: router mints when authorized; funding also covers legacy fallback paths.
         usdc.addMinter(address(router));
         usdc.mint(address(router), 1_000_000_000e6);
 
@@ -199,10 +199,12 @@ contract UpgradeableProtocolTest is Test {
         IERC20(aapl).approve(address(router), 1e18);
 
         uint256 routerUsdcBefore = usdc.balanceOf(address(router));
+        uint256 recipientUsdcBefore = usdc.balanceOf(address(this));
         uint256 out = router.swap(aapl, address(usdc), 1e18, 0, address(this));
 
         assertEq(out, 195e6);
-        assertEq(usdc.balanceOf(address(router)), routerUsdcBefore - 195e6);
+        assertEq(usdc.balanceOf(address(router)), routerUsdcBefore);
+        assertEq(usdc.balanceOf(address(this)) - recipientUsdcBefore, 195e6);
     }
 
     // ===================== Vault Lifecycle (through proxies) =====================
@@ -299,6 +301,33 @@ contract UpgradeableProtocolTest is Test {
         assertEq(router.baseAsset(), address(usdc));
     }
 
+    function test_upgradeTokenRouter_preservesPreFreshnessStorageLayout() public {
+        address oracleWallet = makeAddr("oracleWallet");
+
+        vm.store(address(router), _mappingSlot(aapl, 1), bytes32(uint256(123e18)));
+        vm.store(address(router), _nestedMappingSlot(aapl, msft, 2), bytes32(uint256(1)));
+        vm.store(address(router), _mappingSlot(address(engine), 3), bytes32(uint256(1)));
+        vm.store(address(router), _mappingSlot(aapl, 4), bytes32(uint256(8)));
+        vm.store(address(router), _mappingSlot(aapl, 5), bytes32(uint256(1)));
+        vm.store(address(router), _mappingSlot(oracleWallet, 6), bytes32(uint256(1)));
+        vm.store(address(router), _mappingSlot(aapl, 7), bytes32(0));
+
+        TokenRouterUpgradeable routerV2 = new TokenRouterUpgradeable();
+        router.upgradeToAndCall(
+            address(routerV2),
+            abi.encodeCall(TokenRouterUpgradeable.initializePriceFreshness, (7 days))
+        );
+
+        assertEq(router.getTokenPrice(aapl), 123e18);
+        assertTrue(router.pairSupported(aapl, msft));
+        assertTrue(router.authorizedCallers(address(engine)));
+        assertEq(router.decimalOverride(aapl), 8);
+        assertTrue(router.hasDecimalOverride(aapl));
+        assertTrue(router.authorizedPricers(oracleWallet));
+        assertEq(router.getTokenPriceUpdatedAt(aapl), 0);
+        assertEq(router.maxPriceAge(), 7 days);
+    }
+
     function test_upgradeRebalanceEngine() public {
         RebalanceEngineUpgradeable engineV2 = new RebalanceEngineUpgradeable();
         engine.upgradeToAndCall(address(engineV2), "");
@@ -317,6 +346,15 @@ contract UpgradeableProtocolTest is Test {
 
         assertEq(StockTokenUpgradeable(aapl).balanceOf(alice), balBefore + 10e18);
         assertEq(StockTokenUpgradeable(aapl).symbol(), "AAPL");
+    }
+
+    function _mappingSlot(address key, uint256 slot) internal pure returns (bytes32) {
+        return keccak256(abi.encode(key, slot));
+    }
+
+    function _nestedMappingSlot(address outerKey, address innerKey, uint256 slot) internal pure returns (bytes32) {
+        bytes32 outerSlot = keccak256(abi.encode(outerKey, slot));
+        return keccak256(abi.encode(innerKey, outerSlot));
     }
 
     // ===================== Registry Bulk Register =====================
