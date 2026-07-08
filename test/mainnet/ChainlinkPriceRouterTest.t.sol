@@ -542,4 +542,47 @@ contract ChainlinkPriceRouterTest is Test {
         vm.expectRevert(Initializable.InvalidInitialization.selector);
         router.initialize(alice, address(base));
     }
+
+    // ===================== Rider: decimal-normalization overflow guard =====================
+
+    function test_getTokenPrice_absurdFeedDecimals_returnsZeroNeverReverts() public {
+        // feedDecimals >= 96 makes 10**(feedDecimals-18) overflow uint256. The
+        // >18 branch must fail closed (return 0) instead of reverting inside
+        // _readPrice's success block, which would break the never-revert guarantee.
+        MockAggregatorV3 absurdFeed = new MockAggregatorV3(96, 1_000e8);
+        MockPlainToken weird = new MockPlainToken("Weird", "WRD", 18);
+        router.setFeed(address(weird), address(absurdFeed), 1 hours, "WRD", false);
+        // Must not revert; returns 0.
+        assertEq(router.getTokenPrice(address(weird)), 0);
+    }
+
+    function test_getTokenPrice_maxUint8FeedDecimals_returnsZeroNeverReverts() public {
+        // Extreme boundary: uint8 max decimals (255) must also fail closed.
+        MockAggregatorV3 absurdFeed = new MockAggregatorV3(255, 1e8);
+        MockPlainToken weird = new MockPlainToken("Weird2", "WR2", 18);
+        router.setFeed(address(weird), address(absurdFeed), 1 hours, "WR2", false);
+        assertEq(router.getTokenPrice(address(weird)), 0);
+    }
+
+    function test_getTokenPrice_feedDecimals95_atBoundary_noRevert() public {
+        // diff == 77 is the largest safe exponent (10**77 fits): must not revert.
+        // A normal-magnitude answer divided by 10**77 floors to 0, but the call
+        // itself succeeding is what matters (never-revert guarantee).
+        MockAggregatorV3 boundaryFeed = new MockAggregatorV3(95, 1e8);
+        MockPlainToken weird = new MockPlainToken("Weird3", "WR3", 18);
+        router.setFeed(address(weird), address(boundaryFeed), 1 hours, "WR3", false);
+        assertEq(router.getTokenPrice(address(weird)), 0);
+    }
+
+    // ===================== Rider: sequencer uninitialized-round edge =====================
+
+    function test_depositsOpen_sequencerUninitializedRound_false() public {
+        // answer 0 (would read as "up") but startedAt 0 == uninitialized round:
+        // must be treated as NOT up. Prior to the fix, block.timestamp - 0 was a
+        // huge age that trivially cleared the grace period.
+        MockAggregatorV3 seqFeed = new MockAggregatorV3(0, 0); // answer 0 = up
+        seqFeed.setStartedAt(0); // uninitialized round
+        router.setSequencerFeed(address(seqFeed), 1 hours);
+        assertFalse(router.depositsOpen());
+    }
 }

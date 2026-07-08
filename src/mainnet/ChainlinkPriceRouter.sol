@@ -314,7 +314,13 @@ contract ChainlinkPriceRouter is Initializable, OwnableUpgradeable, UUPSUpgradea
             if (answer > type(uint256).max / scale) return 0;
             return answer * scale;
         }
-        return answer / 10 ** (uint256(feedDecimals) - 18);
+        // feedDecimals > 18: 10 ** (feedDecimals - 18) overflows uint256 once the
+        // exponent reaches 78 (10**77 is the largest power of ten that fits). Guard
+        // symmetrically with the <18 branch — return 0 rather than reverting inside
+        // _readPrice's success block, which would break the never-revert guarantee.
+        uint256 diff = uint256(feedDecimals) - 18;
+        if (diff > 77) return 0;
+        return answer / 10 ** diff;
     }
 
     /// @dev Chainlink L2 pattern: answer 0 = sequencer up; must have been up
@@ -326,6 +332,10 @@ contract ChainlinkPriceRouter is Initializable, OwnableUpgradeable, UUPSUpgradea
             uint80, int256 answer, uint256 startedAt, uint256, uint80
         ) {
             if (answer != 0) return false;
+            // startedAt == 0 is an uninitialized round (canonical Chainlink L2
+            // pattern): the feed has no valid uptime record yet, so treat the
+            // sequencer as NOT up rather than trusting a bogus block.timestamp age.
+            if (startedAt == 0) return false;
             uint256 upFor = block.timestamp > startedAt ? block.timestamp - startedAt : 0;
             return upFor > sequencerGracePeriod;
         } catch {
