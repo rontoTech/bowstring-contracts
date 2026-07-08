@@ -20,6 +20,7 @@ runs = 256
 
 [rpc_endpoints]
 robinhood_testnet = "${RPC_URL}"
+robinhood_mainnet = "https://rpc.mainnet.chain.robinhood.com"
 
 [etherscan]
 robinhood_testnet = { key = "${ETHERSCAN_API_KEY}", url = "https://explorer.testnet.chain.robinhood.com/api" }
