@@ -615,6 +615,41 @@ contract MainnetExecutionEngineTest is Test {
 
     // ===================== admin / misc =====================
 
+    // ===================== Rider: trades-per-rebalance cap =====================
+
+    // MATRIX: trades.length above the cap reverts (before any pull/settlement)
+    function test_maxTradesPerRebalance_capEnforced() public {
+        assertEq(engine.maxTradesPerRebalance(), 20);
+        IRebalanceEngine.TradeOrder[] memory trades = new IRebalanceEngine.TradeOrder[](21);
+        for (uint256 i = 0; i < 21; i++) {
+            trades[i] = IRebalanceEngine.TradeOrder(address(base), address(aapl), 1e6, 0);
+        }
+        // Authorized vault caller so the cap check (not the auth check) is what reverts.
+        vm.prank(address(vault));
+        vm.expectRevert(MainnetExecutionEngine.TooManyTrades.selector);
+        engine.executeRebalance(address(vault), trades);
+    }
+
+    // MATRIX: owner setter re-caps and takes effect; non-owner blocked
+    function test_setMaxTradesPerRebalance_ownerOnlyAndTakesEffect() public {
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, stranger));
+        engine.setMaxTradesPerRebalance(5);
+
+        vm.expectEmit(false, false, false, true);
+        emit MainnetExecutionEngine.MaxTradesPerRebalanceUpdated(1);
+        engine.setMaxTradesPerRebalance(1);
+        assertEq(engine.maxTradesPerRebalance(), 1);
+
+        // Two trades now exceed the tightened cap.
+        IRebalanceEngine.TradeOrder[] memory trades = new IRebalanceEngine.TradeOrder[](2);
+        trades[0] = IRebalanceEngine.TradeOrder(address(base), address(aapl), 1e6, 0);
+        trades[1] = IRebalanceEngine.TradeOrder(address(base), address(aapl), 1e6, 0);
+        vm.prank(address(vault));
+        vm.expectRevert(MainnetExecutionEngine.TooManyTrades.selector);
+        engine.executeRebalance(address(vault), trades);
+    }
+
     function test_setMaxSlippage_boundAndOnlyOwner() public {
         vm.prank(stranger);
         vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, stranger));

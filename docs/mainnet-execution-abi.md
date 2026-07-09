@@ -54,7 +54,7 @@ function stageSettlement(
     uint256 amountIn,
     address target,            // must be in allowedSettlementTargets (0x Settler/AllowanceHolder)
     bytes calldata data        // 0x Swap API v2 transaction.data
-) external;                    // onlyRelayer; consumable only in the same tx
+) external;                    // onlyRelayer; consumable only within the same block (impl truth: stagedBlock == block.number; in practice staged+consumed atomically in one tx via TradeDelegateProxyV2.executeTradeWithSettlement)
 ```
 
 Enforcement inside `executeRebalance` (see plan §A.2): `allowedTokens` on tokenOut for buys (sells always allowed), oracle-anchored minOut floor `max(order.minAmountOut, chainlinkQuote × (1 − maxSlippageBps))`, vault balance-delta verification, per-vault daily notional cap.

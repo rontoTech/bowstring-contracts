@@ -99,6 +99,12 @@ contract MainnetExecutionEngine is
     /// @notice At most one staged settlement per vault, consumable same-block.
     mapping(address => StagedSettlement) internal staged;
 
+    /// @notice Sanity cap on the number of trades per `executeRebalance` call
+    ///         (init 20, owner-tunable). Parity with
+    ///         RebalanceEngineUpgradeable.maxTradesPerRebalance — bounds gas and
+    ///         blast radius of a single rebalance.
+    uint256 public maxTradesPerRebalance;
+
     // ===================== Events =====================
 
     /// @dev FROZEN: byte-identical to ITokenRouter.Swap. `recipient` is always
@@ -123,6 +129,7 @@ contract MainnetExecutionEngine is
     event AmmRouterUpdated(address indexed router);
     event AmmRouteUpdated(address indexed token, bytes path);
     event SlippageUpdated(uint256 newSlippageBps);
+    event MaxTradesPerRebalanceUpdated(uint256 maxTrades);
     event VaultDailyCapUpdated(address indexed vault, uint256 capBase);
     event SettlementStaged(address indexed vault, bytes32 orderHash, address indexed target, address indexed relayer);
     event TokensSwept(address indexed token, address indexed vault, uint256 amount);
@@ -136,6 +143,7 @@ contract MainnetExecutionEngine is
     error TokenNotAllowed();
     error TargetNotAllowed();
     error SlippageTooHigh();
+    error TooManyTrades();
     error DailyCapExceeded();
     error NoRoute();
     error InsufficientOutput();
@@ -154,6 +162,7 @@ contract MainnetExecutionEngine is
         tokenRouter = ITokenRouter(tokenRouter_);
         baseAsset = baseAsset_;
         maxSlippageBps = 150;
+        maxTradesPerRebalance = 20;
     }
 
     // ===================== Admin =====================
@@ -215,6 +224,11 @@ contract MainnetExecutionEngine is
         emit SlippageUpdated(slippageBps);
     }
 
+    function setMaxTradesPerRebalance(uint256 maxTrades) external onlyOwner {
+        maxTradesPerRebalance = maxTrades;
+        emit MaxTradesPerRebalanceUpdated(maxTrades);
+    }
+
     function setVaultDailyCap(address vault, uint256 capBase) external onlyOwner {
         vaultDailyCapBase[vault] = capBase;
         emit VaultDailyCapUpdated(vault, capBase);
@@ -258,6 +272,7 @@ contract MainnetExecutionEngine is
     {
         if (msg.sender != vault) revert UnauthorizedVault();
         if (!authorizedVaults[vault]) revert UnauthorizedVault();
+        if (trades.length > maxTradesPerRebalance) revert TooManyTrades();
         if (address(tokenRouter) == address(0)) revert RouterNotSet();
 
         uint256 today = block.timestamp / 1 days;
@@ -379,5 +394,5 @@ contract MainnetExecutionEngine is
 
     function _authorizeUpgrade(address) internal override onlyOwner {}
 
-    uint256[37] private __gap;
+    uint256[36] private __gap;
 }
