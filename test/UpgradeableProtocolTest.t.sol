@@ -231,6 +231,20 @@ contract UpgradeableProtocolTest is Test {
         assertTrue(assets > 0);
     }
 
+    /// @notice C6 regression: withdrawalSlippageBps is an inline field
+    ///         initializer in BaseVault (`= 100`), which runs in the
+    ///         IMPLEMENTATION's constructor, not the proxy's storage. A
+    ///         freshly created vault behind the beacon proxy must still read
+    ///         the intended 1% (100 bps) default set inside __BaseVault_init.
+    ///         Before the fix this reads 0, which zeroes the sell-path minOut
+    ///         tolerance and reverts every mainnet AMM withdrawal.
+    function test_vault_withdrawalSlippageBps_defaultsTo100_behindProxy() public {
+        address vaultAddr = _createUserVault();
+        UserVault vault = UserVault(vaultAddr);
+
+        assertEq(vault.withdrawalSlippageBps(), 100, "proxy-init must set 1% default withdrawal slippage");
+    }
+
     function test_vault_executeTrade() public {
         address vaultAddr = _createUserVault();
         UserVault vault = UserVault(vaultAddr);

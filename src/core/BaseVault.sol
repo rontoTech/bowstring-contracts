@@ -41,7 +41,13 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
     mapping(address => bool) public isHeldToken;
 
     // --- Slippage ---
-    uint256 public withdrawalSlippageBps = 100; // 1% default
+    // NOTE: this inline initializer only runs in the IMPLEMENTATION contract's
+    // constructor context, never behind a proxy (beacon/UUPS) — a freshly
+    // initialized proxy storage slot reads 0 regardless of this value. It is
+    // kept only so non-proxied/test deploys (e.g. `new UserVault()` used
+    // directly, without a proxy) still get a sane default. The real source of
+    // truth for proxied vaults is the explicit assignment in __BaseVault_init.
+    uint256 public withdrawalSlippageBps = 100; // 1% default (non-proxy deploys only; see __BaseVault_init)
 
     // --- Allocation tracking ---
     uint256 public unallocatedDeposits; // net deposit inflow not yet allocated into the portfolio
@@ -87,6 +93,17 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
         rebalanceEngine = IRebalanceEngine(_rebalanceEngine);
         tokenRouter = ITokenRouter(_tokenRouter);
         lastFeeAccrualTimestamp = block.timestamp;
+
+        // The inline `= 100` field initializer above does NOT run behind a
+        // proxy (beacon/UUPS) — it only executes in the implementation
+        // contract's own constructor context. Proxied vault storage starts
+        // zeroed, so the real 1% default must be assigned here, inside the
+        // function that actually runs against proxy storage. Without this,
+        // withdrawalSlippageBps reads 0 for every newly created vault, which
+        // zeroes the sell-path minOut tolerance (`expectedOut * (10000 - 0) /
+        // 10000 == expectedOut`) and reverts every real AMM withdrawal on any
+        // nonzero slippage.
+        withdrawalSlippageBps = 100;
     }
 
     // ===================== ERC-20 Overrides =====================
