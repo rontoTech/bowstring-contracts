@@ -13,6 +13,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IBaseVault} from "../interfaces/IBaseVault.sol";
 import {IRebalanceEngine} from "../interfaces/IRebalanceEngine.sol";
 import {ITokenRouter} from "../interfaces/ITokenRouter.sol";
+import {IMarketGate} from "../interfaces/IMarketGate.sol";
 import {FeeManager} from "./FeeManager.sol";
 
 /// @title BaseVault
@@ -65,6 +66,7 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
     error SlippageExceeded();
     error DepositTooSmall();
     error OracleDegraded(); // deposits blocked when a held token has zero oracle price
+    error MarketClosed(); // deposits blocked when the market-gate router reports depositsOpen() == false
 
     function __BaseVault_init(
         string memory _name,
@@ -144,6 +146,20 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
         if (assets < MIN_DEPOSIT) revert DepositTooSmall();
         if (receiver == address(0)) revert ZeroAddress();
         if (_hasZeroPriceToken()) revert OracleDegraded();
+
+        // Mainnet market-gate probe. A ChainlinkPriceRouter reports depositsOpen()
+        // == false when the market is closed, the sequencer is down, or a feed is
+        // stale — NAV-sensitive inflows must be blocked in those windows. The gate
+        // is capability-probed: the testnet TokenRouterUpgradeable does NOT
+        // implement depositsOpen(), so the staticcall reverts on the missing
+        // selector, lands in `catch`, and testnet deposits proceed unchanged. A
+        // no-code / EOA router would likewise land in catch (empty returndata
+        // fails the bool decode) — acceptable, and never reached because a live
+        // router prices NAV above. IMPORTANT: `revert MarketClosed()` sits in the
+        // success block, so it PROPAGATES; only call/decode failures are swallowed.
+        try IMarketGate(address(tokenRouter)).depositsOpen() returns (bool open) {
+            if (!open) revert MarketClosed();
+        } catch {}
 
         _accrueManagementFee();
 
@@ -268,6 +284,11 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
     ///         path is broken (e.g., router down, oracle returning zero, engine
     ///         deauthorized, or a held token blocking sells).
     event EmergencyWithdrawn(address indexed user, uint256 shares);
+    /// @dev A held-token transfer reverted during emergencyWithdraw; `amount` is
+    ///      escrowed for `user` and claimable later via claimEmergencyTokens.
+    event EmergencyTransferFailed(address indexed user, address indexed token, uint256 amount);
+    /// @dev Previously-escrowed emergency tokens delivered to `user`.
+    event EmergencyTokensClaimed(address indexed user, address indexed token, uint256 amount);
 
     function emergencyWithdraw() external nonReentrant {
         uint256 shares = balanceOf(msg.sender);
@@ -276,27 +297,71 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
         uint256 supply = totalSupply();
         _burn(msg.sender, shares);
 
-        // Pro-rata base asset
+        // Pro-rata base asset. The base asset is the unit of account and is never
+        // escrowed (a reverting base transfer means the vault's own USDC-like
+        // asset is broken, in which case reverting is correct).
         uint256 baseBal = baseAsset.balanceOf(address(this));
         if (baseBal > 0) {
             uint256 baseShare = (baseBal * shares) / supply;
             if (baseShare > 0) baseAsset.safeTransfer(msg.sender, baseShare);
         }
 
-        // Pro-rata of each held token
+        // Pro-rata of each held token. A single transfer-restricted token must NOT
+        // brick the whole in-kind exit: on failure its share is escrowed and
+        // claimable later (claimEmergencyTokens). Pro-rata is taken over the
+        // CLAIMABLE balance (excluding amounts already escrowed for other users)
+        // so a departing user is never handed someone else's escrow.
         for (uint256 i = 0; i < heldTokens.length; i++) {
-            uint256 bal = IERC20(heldTokens[i]).balanceOf(address(this));
-            if (bal > 0) {
-                uint256 tokenShare = (bal * shares) / supply;
-                if (tokenShare > 0) {
-                    IERC20(heldTokens[i]).safeTransfer(msg.sender, tokenShare);
-                }
+            address token = heldTokens[i];
+            uint256 bal = IERC20(token).balanceOf(address(this));
+            uint256 escrowed = totalUnclaimed[token];
+            uint256 claimable = bal > escrowed ? bal - escrowed : 0;
+            if (claimable == 0) continue;
+
+            uint256 tokenShare = (claimable * shares) / supply;
+            if (tokenShare == 0) continue;
+
+            // Self-call so SafeERC20 semantics apply while a revert stays isolated:
+            // an ERC-20 transfer that reverts moves no tokens, so the catch branch
+            // can escrow `tokenShare` with no risk of double-spend.
+            try this._emergencyTransfer(token, msg.sender, tokenShare) {
+                // delivered in kind
+            } catch {
+                unclaimedEmergency[msg.sender][token] += tokenShare;
+                totalUnclaimed[token] += tokenShare;
+                emit EmergencyTransferFailed(msg.sender, token, tokenShare);
             }
         }
 
         _reconcileUnallocated();
 
         emit EmergencyWithdrawn(msg.sender, shares);
+    }
+
+    /// @notice Self-only SafeERC20 transfer wrapper used by emergencyWithdraw's
+    ///         try/catch. External visibility is required for the self-call; the
+    ///         guard makes it unreachable by any other caller.
+    function _emergencyTransfer(address token, address to, uint256 amount) external {
+        require(msg.sender == address(this), "BaseVault: only self");
+        IERC20(token).safeTransfer(to, amount);
+    }
+
+    /// @notice Claim held tokens that a prior emergencyWithdraw could not deliver
+    ///         (e.g. after a transfer restriction lifts). Re-attemptable: if the
+    ///         transfer still reverts the whole call reverts and the escrow is
+    ///         preserved for a later retry. A second claim after success is a no-op.
+    function claimEmergencyTokens(address token) external nonReentrant returns (uint256 amount) {
+        amount = unclaimedEmergency[msg.sender][token];
+        if (amount == 0) return 0;
+
+        // CEI: clear the escrow before the external transfer. If the transfer
+        // reverts, this state change rolls back and the claim can be retried.
+        unclaimedEmergency[msg.sender][token] = 0;
+        totalUnclaimed[token] -= amount;
+
+        IERC20(token).safeTransfer(msg.sender, amount);
+
+        emit EmergencyTokensClaimed(msg.sender, token, amount);
     }
 
     // ===================== Views =====================
@@ -492,6 +557,13 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
             for (uint256 i = 0; i < heldTokens.length; i++) {
                 address token = heldTokens[i];
                 uint256 bal = IERC20(token).balanceOf(address(this));
+                // Exclude tokens escrowed for departed emergencyWithdraw users:
+                // those are owed to those users, not the remaining holders, so
+                // counting them would let a stranded balance inflate everyone
+                // else's share price. Subtracted exactly once; a no-op (bal
+                // unchanged) whenever no escrow exists.
+                uint256 escrowed = totalUnclaimed[token];
+                bal = bal > escrowed ? bal - escrowed : 0;
                 if (bal > 0) {
                     uint256 tokenPrice = tokenRouter.getTokenPrice(token);
                     if (tokenPrice == 0) continue;
@@ -801,5 +873,16 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
     function pause() external virtual;
     function unpause() external virtual;
 
-    uint256[50] private __gap;
+    // --- Emergency escrow (appended into __gap; storage-layout safe) ---
+    /// @notice user => token => amount owed from a failed emergencyWithdraw
+    ///         transfer, claimable via claimEmergencyTokens.
+    mapping(address => mapping(address => uint256)) public unclaimedEmergency;
+    /// @notice token => total escrowed (unclaimed) amount, excluded from NAV so a
+    ///         departed user's stranded tokens are never redistributed to holders.
+    mapping(address => uint256) public totalUnclaimed;
+
+    // __gap reduced from 50 -> 48 to make room for the two mappings above; the
+    // total storage footprint of BaseVault is unchanged so UserVault's slots do
+    // not move (beacon-proxy upgrade safety).
+    uint256[48] private __gap;
 }
