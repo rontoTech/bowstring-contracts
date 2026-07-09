@@ -10,7 +10,6 @@ import {ChainlinkPriceRouter} from "../src/mainnet/ChainlinkPriceRouter.sol";
 import {MainnetExecutionEngine} from "../src/mainnet/MainnetExecutionEngine.sol";
 import {TradeDelegateProxyV2} from "../src/mainnet/TradeDelegateProxyV2.sol";
 import {UserVaultFactoryV2} from "../src/core/UserVaultFactoryV2.sol";
-import {PriceOracleUpgradeable} from "../src/oracle/PriceOracleUpgradeable.sol";
 
 interface IOwnable {
     function owner() external view returns (address);

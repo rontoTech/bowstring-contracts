@@ -74,6 +74,10 @@ contract DeployMainnet is Script {
         uint256 pk = vm.envUint("PRIVATE_KEY");
         address deployer = vm.addr(pk);
         address safe = vm.envAddress("SAFE_ADDRESS");
+        // The leaked EOA is the repo's current deployer key (rotation still
+        // outstanding, 2026-06 audit). Refuse to deploy from it: otherwise every
+        // fresh singleton would be owned by a compromised key until handover.
+        require(deployer != LEAKED_EOA, "DeployMainnet: deployer is the leaked EOA");
         require(safe != address(0), "DeployMainnet: SAFE_ADDRESS zero");
         require(safe != LEAKED_EOA, "DeployMainnet: SAFE_ADDRESS is the leaked EOA");
 
@@ -240,6 +244,8 @@ contract DeployMainnet is Script {
             if (relayer != address(0)) {
                 delegate.setAuthorizedSigner(relayer, true);
                 console.log("  Signer authorized:", relayer);
+            } else {
+                console.log("  WARNING: RELAYER_ADDRESS unset -> no signer authorized on the delegate proxy.");
             }
         }
 
@@ -313,12 +319,12 @@ contract DeployMainnet is Script {
         vm.stopBroadcast();
 
         // ===================== Post-checks (fail the script) =====================
-        _postChecks(d);
+        _postChecks(d, deployer);
 
         _printJson(d, deployer, safe, seedTokens, seedSymbols, feedKeys);
     }
 
-    function _postChecks(Deployed memory d) internal view {
+    function _postChecks(Deployed memory d, address deployer) internal view {
         // RouterDrift precondition: the engine the factory points at must expose
         // the SAME token router the factory hands new vaults, else every vault is
         // born broken. MainnetExecutionEngine.tokenRouter() must equal priceRouter.
@@ -338,7 +344,7 @@ contract DeployMainnet is Script {
         require(TradeDelegateProxyV2(d.delegateProxyV2).engine() == d.engine, "post: delegate engine mismatch");
 
         // Price router still owner=deployer pre-handover (Safe transfer is a separate script).
-        require(ChainlinkPriceRouter(d.priceRouter).owner() != address(0), "post: price router owner zero");
+        require(ChainlinkPriceRouter(d.priceRouter).owner() == deployer, "post: price router owner != deployer");
 
         console.log("\nAll post-checks PASSED (beacon owned by factory; router aligned).");
     }

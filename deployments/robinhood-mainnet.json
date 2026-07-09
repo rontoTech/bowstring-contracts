@@ -4,10 +4,10 @@
   "rpcUrl": "https://rpc.mainnet.chain.robinhood.com",
   "explorer": "https://robinhoodchain.blockscout.com",
   "explorerApi": "https://robinhoodchain.blockscout.com/api/v2",
-  "deployer": "0xd3f9Dcd6011E1aA13eEB277d9CE5F2f7c9BB6070",
+  "deployer": "",
   "safe": "",
   "deployedAt": "",
-  "note": "Addresses are populated post-broadcast. DeployMainnet.s.sol console.logs a ready-to-paste JSON block. Ownership of every listed contract must be the Safe (verify with AssertMainnetOwnership.s.sol); the UserVaultBeacon is owned by UserVaultFactoryV2, not the Safe directly.",
+  "note": "Addresses are populated post-broadcast. DeployMainnet.s.sol console.logs a ready-to-paste JSON block. Do NOT deploy from the leaked EOA 0xd3f9Dcd6011E1aA13eEB277d9CE5F2f7c9BB6070 (rotation outstanding); the deploy script reverts if PRIVATE_KEY resolves to it. Ownership of every listed contract must be the Safe (verify with AssertMainnetOwnership.s.sol); the UserVaultBeacon is owned by UserVaultFactoryV2, not the Safe directly.",
   "contracts": {
     "USDG": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
     "Permit2": "0x000000000022D473030F116dDEE9F6B43aC78BA3",
