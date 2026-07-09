@@ -628,4 +628,91 @@ contract VaultMarketGateTest is Test {
         assertEq(vault.totalUnclaimed(address(restricted)), 0, "no escrow");
         assertEq(vault.unclaimedEmergency(alice, address(restricted)), 0, "no escrow");
     }
+
+    // ===================== sweepFractionalPositions escrow netting (C5 Fix C) =====================
+
+    // Reviewer repro (Minor, genuine): sweepFractionalPositions read the RAW
+    // balanceOf, not the escrow-netted available balance. With a fractional
+    // escrow present and available < 1e18, `remainder = rawBalance % 1e18` can
+    // exceed the available (non-escrowed) balance, so the sweep sells escrowed
+    // tokens and bricks the escrowed user's claimEmergencyTokens forever.
+    //
+    // Fixture (wei-exact): vault holds 1.5e18 restricted; alice owns 80% and
+    // emergency-exits while restricted is frozen, escrowing exactly 1.2e18. That
+    // leaves available = 0.3e18. Pre-fix the sweep sold rawBalance % 1e18 =
+    // 0.5e18, dropping the vault to 1.0e18 < the 1.2e18 escrow -> alice's claim
+    // reverts. Post-fix it sells available % 1e18 = 0.3e18, leaving the 1.2e18
+    // escrow physically reserved and fully claimable.
+    function test_sweep_reservesFractionalEscrow() public {
+        // alice 80% / bob 20% (bob remains after alice's emergency exit).
+        _deposit(alice, 40_000e6); // first depositor: 40_000e6 shares
+        _deposit(bob, 10_000e6); //  -> total supply 50_000e6, alice owns 80%
+
+        // Curator buys exactly 1.5e18 restricted ($75). base->restricted at
+        // 6->18 dec, $1 vs $50: 75e6 * 1e12 / 50 = 1.5e18. restricted is now the
+        // sole held token.
+        _curatorBuy(address(restricted), 75e6);
+        assertEq(restricted.balanceOf(address(vault)), 1.5e18, "exact restricted buy");
+
+        // Freeze restricted; alice emergency-exits. 80% of the 1.5e18 available
+        // restricted = 1.2e18 is escrowed (its transfer reverts).
+        restricted.setBlockTransfers(true);
+        vm.prank(alice);
+        vault.emergencyWithdraw();
+        assertEq(vault.totalUnclaimed(address(restricted)), 1.2e18, "fractional escrow recorded");
+        assertEq(restricted.balanceOf(address(vault)), 1.5e18, "escrow physically retained");
+        // available = 1.5e18 - 1.2e18 = 0.3e18.
+
+        // Unfreeze so the sweep's sell (and later claim) can transfer out.
+        restricted.setBlockTransfers(false);
+
+        vm.prank(curator);
+        vault.setWholeSharesOnly(true);
+
+        // The sweep must sell ONLY the 0.3e18 available remainder.
+        uint256 vaultUsdcBefore = usdc.balanceOf(address(vault));
+        uint256 slip = vault.withdrawalSlippageBps();
+        uint256 expMinOut = (15e6 * (10000 - slip)) / 10000; // 0.3e18 restricted = $15 = 15e6
+        vm.expectEmit(true, false, false, true, address(vault));
+        emit UserVault.FractionalPositionSwept(address(restricted), 0.3e18, expMinOut);
+
+        vm.prank(curator);
+        vault.sweepFractionalPositions();
+
+        // Escrow reserved wei-exact: only the non-escrowed 0.3e18 was sold.
+        assertEq(restricted.balanceOf(address(vault)), 1.2e18, "escrow untouched; only available swept");
+        assertEq(vault.totalUnclaimed(address(restricted)), 1.2e18, "escrow accounting unchanged");
+        assertEq(usdc.balanceOf(address(vault)) - vaultUsdcBefore, 15e6, "remainder returned as base");
+
+        // Alice's claim now succeeds for the full escrow, wei-exact.
+        vm.prank(alice);
+        uint256 claimed = vault.claimEmergencyTokens(address(restricted));
+        assertEq(claimed, 1.2e18, "escrow fully claimable after sweep");
+        assertEq(restricted.balanceOf(alice), 1.2e18, "alice made whole");
+        assertEq(restricted.balanceOf(address(vault)), 0, "vault emptied of restricted");
+        assertEq(vault.totalUnclaimed(address(restricted)), 0, "escrow cleared");
+    }
+
+    // Byte-identical control: with NO escrow, available == rawBalance, so the
+    // sweep behaves exactly as before the fix — selling the full balance % 1e18.
+    function test_sweep_noEscrowByteIdentical() public {
+        _deposit(alice, 40_000e6);
+        _curatorBuy(address(restricted), 75e6); // 1.5e18 restricted, no escrow
+        assertEq(restricted.balanceOf(address(vault)), 1.5e18);
+
+        vm.prank(curator);
+        vault.setWholeSharesOnly(true);
+
+        uint256 slip = vault.withdrawalSlippageBps();
+        uint256 expMinOut = (25e6 * (10000 - slip)) / 10000; // 0.5e18 restricted = $25 = 25e6
+        vm.expectEmit(true, false, false, true, address(vault));
+        emit UserVault.FractionalPositionSwept(address(restricted), 0.5e18, expMinOut);
+
+        vm.prank(curator);
+        vault.sweepFractionalPositions();
+
+        // No escrow: full 0.5e18 remainder sold, 1.0e18 whole shares remain.
+        assertEq(restricted.balanceOf(address(vault)), 1e18, "sells full balance % 1e18 remainder");
+        assertEq(vault.totalUnclaimed(address(restricted)), 0, "no escrow");
+    }
 }

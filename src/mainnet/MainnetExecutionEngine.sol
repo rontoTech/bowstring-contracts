@@ -299,6 +299,11 @@ contract MainnetExecutionEngine is
         uint256 effMinOut = trade.minAmountOut > floor ? trade.minAmountOut : floor;
 
         // Daily notional cap (base terms). Accounted BEFORE any external call (CEI).
+        // OPS NOTE: this cap also gates the forced sells inside UserVault
+        // withdraw()/redeem() (they liquidate through executeRebalance too), so a
+        // capped vault near its daily limit can revert *normal* withdrawals with
+        // DailyCapExceeded. emergencyWithdraw() is cap-free and in-kind, so the
+        // exit is always preserved — set caps with withdrawal headroom in mind.
         uint256 cap = vaultDailyCapBase[vault];
         if (cap != 0) {
             uint256 notional =

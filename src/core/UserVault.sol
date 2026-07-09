@@ -366,7 +366,13 @@ contract UserVault is BaseVault {
             address token = tokens[i];
             if (token == address(baseAsset)) continue;
 
-            uint256 balance = IERC20(token).balanceOf(address(this));
+            // AVAILABLE balance only: tokens escrowed for departed
+            // emergencyWithdraw users (totalUnclaimed) are physically reserved and
+            // must never be sold. Reading the raw balanceOf here let a fractional
+            // escrow push `remainder` above the sellable amount, burning the escrow
+            // and bricking claimEmergencyTokens (BaseVault._availableBalance is the
+            // canonical net-of-escrow reader every balance path must use).
+            uint256 balance = _availableBalance(token);
             uint256 remainder = balance % WHOLE_SHARE_UNIT;
             if (remainder == 0) continue;
             if (WHOLE_SHARE_UNIT - remainder <= WHOLE_SHARE_SNAP_THRESHOLD) continue;

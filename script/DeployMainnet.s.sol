@@ -225,13 +225,30 @@ contract DeployMainnet is Script {
                 console.log("  allowedToken:", seedSymbols[i], seedTokens[i]);
             }
 
-            // Optional AMM fallback venue.
+            // Optional AMM fallback venue + per-token routes. User withdraw()/
+            // redeem() liquidate via engine.executeRebalance with NO stage (only
+            // the relayer can stage, same-block), so they can settle only through
+            // _settleViaAmm — which reverts NoRoute unless BOTH ammRouter != 0 AND
+            // ammRoute[token].length > 0. Without these, withdraw-to-base reverts
+            // for any fully-invested vault and only in-kind emergencyWithdraw
+            // exits. Routes are per-token hex paths from <SYMBOL>_AMM_ROUTE; each
+            // is warn+skipped when unset (never a guessed route).
             address amm = vm.envOr("AMM_ROUTER", address(0));
             if (amm != address(0)) {
                 engine.setAmmRouter(amm);
                 console.log("  AMM router set:", amm);
+                for (uint256 i = 0; i < seedTokens.length; i++) {
+                    bytes memory route = vm.envOr(string.concat(seedSymbols[i], "_AMM_ROUTE"), bytes(""));
+                    if (route.length > 0) {
+                        engine.setAmmRoute(seedTokens[i], route);
+                        console.log("  AMM route set (withdraw-to-base ENABLED):", seedSymbols[i]);
+                    } else {
+                        console.log("  WARNING: WITHDRAW-TO-BASE DISABLED until ammRoute set for:", seedSymbols[i]);
+                    }
+                }
             } else {
-                console.log("  WARNING: AMM_ROUTER unset -> AMM fallback path unavailable (0x-only).");
+                console.log("  WARNING: AMM_ROUTER unset -> AMM fallback unavailable (0x-only).");
+                console.log("  WARNING: WITHDRAW-TO-BASE DISABLED for ALL seed tokens until AMM_ROUTER + routes set.");
             }
         }
 
@@ -247,6 +264,17 @@ contract DeployMainnet is Script {
             } else {
                 console.log("  WARNING: RELAYER_ADDRESS unset -> no signer authorized on the delegate proxy.");
             }
+
+            // Authorize the delegate proxy itself as an engine RELAYER. This is
+            // the critical relayer: the primary 0x-staged path runs
+            // proxy.executeTradeWithSettlement -> engine.stageSettlement with
+            // msg.sender == this proxy, gated by authorizedRelayers[msg.sender]
+            // (MainnetExecutionEngine.stageSettlement). Without it every staged
+            // trade reverts UnauthorizedRelayer and no staged trade can execute.
+            // The backend RELAYER_ADDRESS is also an engine relayer (section 4)
+            // for any direct-relayer flow, but the PROXY is the one that stages.
+            engine.setRelayer(address(delegate), true);
+            console.log("  Engine relayer authorized (delegate proxy):", d.delegateProxyV2);
         }
 
         // ===== 6. UserVault impl + UpgradeableBeacon =====
@@ -321,6 +349,11 @@ contract DeployMainnet is Script {
         // ===================== Post-checks (fail the script) =====================
         _postChecks(d, deployer);
 
+        // Informational liveness report (does NOT revert): withdraw-to-base
+        // readiness per token. The proxy-relayer requirement is enforced hard in
+        // _postChecks; AMM routes may legitimately be deferred at genesis.
+        _reportLiveness(d, seedTokens, seedSymbols);
+
         _printJson(d, deployer, safe, seedTokens, seedSymbols, feedKeys);
     }
 
@@ -343,10 +376,43 @@ contract DeployMainnet is Script {
         // Delegate proxy points at the engine.
         require(TradeDelegateProxyV2(d.delegateProxyV2).engine() == d.engine, "post: delegate engine mismatch");
 
+        // Fix A (mandatory): the delegate proxy MUST be an authorized engine
+        // relayer. The primary 0x-staged path stages settlement with
+        // msg.sender == delegateProxyV2, gated on authorizedRelayers[msg.sender];
+        // without this every staged trade reverts UnauthorizedRelayer.
+        require(
+            MainnetExecutionEngine(d.engine).authorizedRelayers(d.delegateProxyV2), "post: proxy not engine relayer"
+        );
+
         // Price router still owner=deployer pre-handover (Safe transfer is a separate script).
         require(ChainlinkPriceRouter(d.priceRouter).owner() == deployer, "post: price router owner != deployer");
 
-        console.log("\nAll post-checks PASSED (beacon owned by factory; router aligned).");
+        console.log("\nAll post-checks PASSED (beacon owned by factory; router aligned; proxy is engine relayer).");
+    }
+
+    /// @notice Informational (non-reverting) liveness report — is the stack
+    ///         actually wired for trading AND withdrawals, not merely owned. The
+    ///         proxy-relayer is enforced hard in _postChecks; withdraw-to-base
+    ///         readiness (ammRouter + per-token ammRoute) may be intentionally
+    ///         deferred at genesis, so it is surfaced as a loud warning here.
+    function _reportLiveness(Deployed memory d, address[] memory seedTokens, string[] memory seedSymbols)
+        internal
+        view
+    {
+        MainnetExecutionEngine engine = MainnetExecutionEngine(d.engine);
+        console.log("\n===== Liveness (trade + withdraw wiring) =====");
+        console.log("Proxy authorized as engine relayer (staged trades live):");
+        console.log("  ", engine.authorizedRelayers(d.delegateProxyV2));
+        address amm = engine.ammRouter();
+        console.log("engine.ammRouter():", amm);
+        for (uint256 i = 0; i < seedTokens.length; i++) {
+            bool routed = amm != address(0) && engine.ammRoute(seedTokens[i]).length > 0;
+            if (routed) {
+                console.log("  withdraw-to-base ENABLED:", seedSymbols[i]);
+            } else {
+                console.log("  WITHDRAW-TO-BASE DISABLED (in-kind emergencyWithdraw only) for:", seedSymbols[i]);
+            }
+        }
     }
 
     function _printJson(

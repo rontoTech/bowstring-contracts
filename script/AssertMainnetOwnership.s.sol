@@ -32,6 +32,14 @@ interface IOwnable {
 contract AssertMainnetOwnership is Script {
     address constant LEAKED_EOA = 0xd3f9Dcd6011E1aA13eEB277d9CE5F2f7c9BB6070;
 
+    // Seed token set (mirror of DeployMainnet) — used only for the informational
+    // AMM withdraw-to-base liveness report; not part of the ownership assertions.
+    address constant AAPL = 0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9;
+    address constant MSFT = 0xe93237C50D904957Cf27E7B1133b510C669c2e74;
+    address constant TSLA = 0x322F0929c4625eD5bAd873c95208D54E1c003b2d;
+    address constant GOOGL = 0x2e0847E8910a9732eB3fb1bb4b70a580ADAD4FE3;
+    address constant NVDA = 0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC;
+
     uint256 internal failures;
 
     function _check(bool cond, string memory label) internal {
@@ -114,6 +122,34 @@ contract AssertMainnetOwnership is Script {
             address(MainnetExecutionEngine(engine).tokenRouter()) == priceRouter, "Engine router == PriceRouter"
         );
         _check(UserVaultFactoryV2(payable(factory)).isRouterAligned(), "Factory router aligned");
+
+        // -------- 4. Liveness: trades & withdrawals actually wired --------
+        // Ownership being clean is necessary but not sufficient: a deploy can be
+        // fully Safe-owned yet unable to trade or process withdraw-to-base. Surface
+        // both so go/no-go reflects "the stack actually works", not just custody.
+        console.log("\n[4] Liveness (trade + withdraw wiring):");
+        // MANDATORY (hard fail): the delegate proxy must be an engine relayer, else
+        // every 0x-staged trade reverts UnauthorizedRelayer (the staged path calls
+        // stageSettlement with msg.sender == TradeDelegateProxyV2).
+        _check(
+            MainnetExecutionEngine(engine).authorizedRelayers(delegate),
+            "Delegate proxy authorized as engine relayer"
+        );
+        // WARNING only (not a failure): withdraw-to-base for a fully-invested vault
+        // needs ammRouter + per-token ammRoute; genesis may intentionally launch
+        // 0x-only (in-kind emergencyWithdraw still exits). Print, don't fail.
+        address amm = MainnetExecutionEngine(engine).ammRouter();
+        console.log("  engine.ammRouter():", amm);
+        address[5] memory seeds = [AAPL, MSFT, TSLA, GOOGL, NVDA];
+        string[5] memory syms = ["AAPL", "MSFT", "TSLA", "GOOGL", "NVDA"];
+        for (uint256 i = 0; i < seeds.length; i++) {
+            bool routed = amm != address(0) && MainnetExecutionEngine(engine).ammRoute(seeds[i]).length > 0;
+            if (routed) {
+                console.log("  [ok]   withdraw-to-base ENABLED:", syms[i]);
+            } else {
+                console.log("  [warn] WITHDRAW-TO-BASE DISABLED until ammRoute set:", syms[i]);
+            }
+        }
 
         // -------- Summary --------
         console.log("\n==================================================");

@@ -111,9 +111,33 @@ function tokenBySymbol(string calldata symbol) external view returns (address);
 | `bowstring-backend/src/agent-api.ts` backfill-positions | `Swap` via explorer API | explorer base + address via chain-config |
 | `bowstring-backend/src/trading-api.ts` (mainnet branch) | calls `executeTradeWithSettlement` | new code path per plan §B |
 
+## Deploy wiring runbook (must-do, else the stack is dead as-scripted)
+
+Two engine wirings are not optional for a working deploy; `DeployMainnet.s.sol` now
+does the first unconditionally and the second from env, and both are surfaced by
+`AssertMainnetOwnership.s.sol`'s `[4] Liveness` section (proxy-relayer = hard fail,
+AMM route = warning):
+
+1. **Delegate proxy must be an engine relayer.** The primary 0x-staged path is
+   `TradeDelegateProxyV2.executeTradeWithSettlement -> engine.stageSettlement`, and
+   `stageSettlement` gates on `authorizedRelayers[msg.sender]` where `msg.sender`
+   is the *proxy*. If the proxy is not authorized, every staged trade reverts
+   `UnauthorizedRelayer`. `DeployMainnet` calls `engine.setRelayer(delegateProxyV2,
+   true)` and hard-requires it in post-checks; the backend `RELAYER_ADDRESS` is a
+   relayer too (direct flow) but the proxy is the one that actually stages.
+2. **Withdraw-to-base needs `ammRouter` + per-token `ammRoute`.** User
+   `withdraw()`/`redeem()` drive `engine.executeRebalance` with NO stage (only the
+   relayer can stage, same-block), so they settle only via `_settleViaAmm`, which
+   reverts `NoRoute` unless BOTH `ammRouter != 0` AND `ammRoute[token].length > 0`.
+   Set `AMM_ROUTER` and each `<SYMBOL>_AMM_ROUTE` (hex path) at deploy. Until a
+   token has a route, **withdraw-to-base is DISABLED for that token** and exits are
+   in-kind only (`emergencyWithdraw`, which needs neither router nor route). This
+   may be intentionally deferred at genesis, so the assert warns rather than fails.
+
 ## Open items before freeze
 
 - [ ] Confirm 0x Settler vs AllowanceHolder as the `target` on chain 4663 (pull one live `/quote` and inspect `transaction.to` + `issues.allowance`).
 - [ ] Decide whether `executeTradesBatch` gets a settlement-aware variant (v1: not needed; one order = one tx).
 - [ ] Confirm the Chainlink L2 Sequencer Uptime Feed address on 4663 (or omit the check if the feed doesn't exist there).
+- [ ] Confirm the mainnet AMM venue + per-token route paths for `<SYMBOL>_AMM_ROUTE` (or explicitly launch 0x-only with withdraw-to-base deferred).
 - [ ] Sign-off: contracts owner ☐ · backend owner ☐
