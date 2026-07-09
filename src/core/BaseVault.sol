@@ -157,6 +157,9 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
         // fails the bool decode) — acceptable, and never reached because a live
         // router prices NAV above. IMPORTANT: `revert MarketClosed()` sits in the
         // success block, so it PROPAGATES; only call/decode failures are swallowed.
+        // Fail-open here is safe ONLY because tokenRouter is trusted, protocol-
+        // controlled infrastructure (curator changes are timelocked ≥ 24h via
+        // UserVault.setTokenRouter) — not an arbitrary user-supplied address.
         try IMarketGate(address(tokenRouter)).depositsOpen() returns (bool open) {
             if (!open) revert MarketClosed();
         } catch {}
@@ -313,9 +316,7 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
         // so a departing user is never handed someone else's escrow.
         for (uint256 i = 0; i < heldTokens.length; i++) {
             address token = heldTokens[i];
-            uint256 bal = IERC20(token).balanceOf(address(this));
-            uint256 escrowed = totalUnclaimed[token];
-            uint256 claimable = bal > escrowed ? bal - escrowed : 0;
+            uint256 claimable = _availableBalance(token);
             if (claimable == 0) continue;
 
             uint256 tokenShare = (claimable * shares) / supply;
@@ -556,14 +557,12 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
 
             for (uint256 i = 0; i < heldTokens.length; i++) {
                 address token = heldTokens[i];
-                uint256 bal = IERC20(token).balanceOf(address(this));
-                // Exclude tokens escrowed for departed emergencyWithdraw users:
-                // those are owed to those users, not the remaining holders, so
-                // counting them would let a stranded balance inflate everyone
-                // else's share price. Subtracted exactly once; a no-op (bal
-                // unchanged) whenever no escrow exists.
-                uint256 escrowed = totalUnclaimed[token];
-                bal = bal > escrowed ? bal - escrowed : 0;
+                // Available balance excludes tokens escrowed for departed
+                // emergencyWithdraw users: those are owed to those users, not
+                // the remaining holders, so counting them would let a stranded
+                // balance inflate everyone else's share price. Subtracted
+                // exactly once; a no-op whenever no escrow exists.
+                uint256 bal = _availableBalance(token);
                 if (bal > 0) {
                     uint256 tokenPrice = tokenRouter.getTokenPrice(token);
                     if (tokenPrice == 0) continue;
@@ -588,10 +587,26 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
         }
     }
 
-    /// @notice Value of a single held token in base asset terms, normalized to base decimals
+    /// @dev Vault balance of `token` net of emergency escrow. Escrowed amounts
+    ///      are owed to departed emergencyWithdraw users (claimEmergencyTokens)
+    ///      and are physically reserved: never valued in NAV, never sold for
+    ///      liquidity, never redistributed. Every balance-driven path
+    ///      (_totalAssets, _tokenValueInBase, _ensureBaseLiquidity,
+    ///      emergencyWithdraw pro-rata) MUST read through this helper so a
+    ///      claim can always be honored. No-op when totalUnclaimed[token] == 0.
+    function _availableBalance(address token) internal view returns (uint256) {
+        uint256 bal = IERC20(token).balanceOf(address(this));
+        uint256 escrowed = totalUnclaimed[token];
+        return bal > escrowed ? bal - escrowed : 0;
+    }
+
+    /// @notice Value of a single held token in base asset terms, normalized to
+    ///         base decimals. Valued over the AVAILABLE (non-escrowed) balance so
+    ///         the sell path (_ensureBaseLiquidity) never prices — and therefore
+    ///         never sells — tokens reserved for emergency claims.
     function _tokenValueInBase(address token) internal view returns (uint256) {
         if (address(tokenRouter) == address(0)) return 0;
-        uint256 bal = IERC20(token).balanceOf(address(this));
+        uint256 bal = _availableBalance(token);
         if (bal == 0) return 0;
 
         uint256 tokenPrice = tokenRouter.getTokenPrice(token);
@@ -645,8 +660,14 @@ abstract contract BaseVault is Initializable, ERC20Upgradeable, ReentrancyGuard,
             uint256 sellValueBase = (deficit * tokenVal + totalHeldValue - 1) / totalHeldValue;
             if (sellValueBase == 0) continue;
 
-            // Convert base-asset-denominated value to token units (ceil to avoid undershoot)
-            uint256 tokenBal = IERC20(token).balanceOf(address(this));
+            // Convert base-asset-denominated value to token units (ceil to avoid
+            // undershoot). AVAILABLE balance only: tokens escrowed for departed
+            // emergencyWithdraw users are physically reserved and must never be
+            // sold — a temporary transfer halt that lifts (the realistic
+            // restriction pattern) would otherwise let this sell burn the escrow
+            // and brick claimEmergencyTokens forever. Consistent with tokenVal,
+            // which is valued over the same available balance.
+            uint256 tokenBal = _availableBalance(token);
             uint256 sellAmount = (tokenBal * sellValueBase + tokenVal - 1) / tokenVal;
             if (sellAmount > tokenBal) sellAmount = tokenBal;
             if (sellAmount == 0) continue;

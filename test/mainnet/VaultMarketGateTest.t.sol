@@ -522,6 +522,99 @@ contract VaultMarketGateTest is Test {
         assertEq(restricted.balanceOf(bob), 20e18);
     }
 
+    // ===================== escrow reserved from sell paths (review fix) =====================
+
+    // Reviewer repro (Critical): TEMPORARY halt. (1) token frozen -> alice
+    // emergencyWithdraw escrows 20e18 (40e18 physically on vault); (2) token
+    // UNFREEZES; (3) bob withdraw() triggers _ensureBaseLiquidity. Pre-fix the
+    // sell used the RAW balanceOf and burned the position below the escrow, so
+    // (4) alice's claim reverted forever — her assets had gone to bob. Post-fix
+    // only the 20e18 NON-escrowed tokens are sellable and the claim transfers
+    // exactly 20e18. All amounts wei-exact.
+    function test_escrowReserved_unfreezeThenWithdrawThenClaim() public {
+        _seedMixedVault(); // base 15_000e6, good 30e18 ($3_000), restricted 40e18 ($2_000)
+
+        // (1) frozen -> alice's emergency exit escrows her 20e18 restricted.
+        restricted.setBlockTransfers(true);
+        vm.prank(alice);
+        vault.emergencyWithdraw();
+        assertEq(vault.totalUnclaimed(address(restricted)), 20e18);
+        assertEq(restricted.balanceOf(address(vault)), 40e18, "all restricted still on vault");
+        assertEq(vault.sharePrice(), 1e18, "bob unaffected by escrow");
+
+        // (2) restriction lifts.
+        restricted.setBlockTransfers(false);
+        assertEq(vault.sharePrice(), 1e18, "bob unaffected by unfreeze");
+
+        // (3) bob withdraws his full 10_000e6. Deficit 2_500e6 is covered by
+        // selling ALL 15e18 good ($1_500) plus exactly the 20e18 non-escrowed
+        // restricted ($1_000) — never the escrow.
+        uint256 bobBefore = usdc.balanceOf(bob);
+        vm.prank(bob);
+        vault.withdraw(10_000e6, bob, bob);
+        assertEq(usdc.balanceOf(bob) - bobBefore, 10_000e6, "bob receives full value");
+        assertEq(good.balanceOf(address(vault)), 0, "good fully sold");
+        assertEq(
+            restricted.balanceOf(address(vault)),
+            20e18,
+            "escrow physically reserved: exactly the escrowed 20e18 remain"
+        );
+
+        // (4) alice's claim succeeds, wei-exact.
+        vm.prank(alice);
+        uint256 claimed = vault.claimEmergencyTokens(address(restricted));
+        assertEq(claimed, 20e18, "claim transfers exactly the escrowed amount");
+        assertEq(restricted.balanceOf(alice), 20e18, "alice made whole");
+        assertEq(restricted.balanceOf(address(vault)), 0);
+        assertEq(vault.totalUnclaimed(address(restricted)), 0);
+    }
+
+    // Ordering flipped: unfreeze -> alice claims FIRST -> bob withdraws. The
+    // claim is NAV-neutral (escrow and balance leave together) and bob's
+    // liquidity path then sells his 20e18 normally.
+    function test_escrowReserved_unfreezeThenClaimThenWithdraw() public {
+        _seedMixedVault();
+        restricted.setBlockTransfers(true);
+        vm.prank(alice);
+        vault.emergencyWithdraw();
+
+        restricted.setBlockTransfers(false);
+        vm.prank(alice);
+        assertEq(vault.claimEmergencyTokens(address(restricted)), 20e18);
+        assertEq(restricted.balanceOf(address(vault)), 20e18, "bob's 20e18 remain, none escrowed");
+        assertEq(vault.sharePrice(), 1e18, "claim is NAV-neutral");
+
+        uint256 bobBefore = usdc.balanceOf(bob);
+        vm.prank(bob);
+        vault.withdraw(10_000e6, bob, bob);
+        assertEq(usdc.balanceOf(bob) - bobBefore, 10_000e6, "bob receives full value");
+        assertEq(restricted.balanceOf(address(vault)), 0, "bob's restricted sellable after claim");
+    }
+
+    // sharePrice neutrality for the remaining holder at EVERY step of the
+    // freeze -> emergency -> unfreeze -> claim sequence, then a full-value redeem.
+    function test_escrowReserved_sharePriceNeutralAcrossSequence() public {
+        _seedMixedVault();
+        assertEq(vault.sharePrice(), 1e18);
+
+        restricted.setBlockTransfers(true);
+        vm.prank(alice);
+        vault.emergencyWithdraw();
+        assertEq(vault.sharePrice(), 1e18, "after escrowing emergency exit");
+
+        restricted.setBlockTransfers(false);
+        assertEq(vault.sharePrice(), 1e18, "after unfreeze");
+
+        vm.prank(alice);
+        vault.claimEmergencyTokens(address(restricted));
+        assertEq(vault.sharePrice(), 1e18, "after claim");
+
+        uint256 bobBefore = usdc.balanceOf(bob);
+        vm.prank(bob);
+        vault.redeem(10_000e6, bob, bob);
+        assertEq(usdc.balanceOf(bob) - bobBefore, 10_000e6, "bob redeems every share at 1:1");
+    }
+
     // Sanity: with no failed transfers, emergencyWithdraw delivers everything in
     // kind and records no escrow (zero behavior change vs the old path).
     function test_emergency_noEscrowWhenAllTransfersSucceed() public {
