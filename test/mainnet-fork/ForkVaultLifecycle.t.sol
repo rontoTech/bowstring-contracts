@@ -204,11 +204,13 @@ contract ForkVaultLifecycle is ForkBase {
 
     function test_executeRebalance_deferredToLiveQuoteScript() public {
         if (_skipIfNoFork()) return;
-        // No 0x settler calldata and no AMM pool are reachable in a pure fork, so
-        // a real settlement cannot be produced here. We assert the negative
-        // precondition (no AMM route configured) and document the deferral.
+        // This suite stays network-free beyond the fork itself; the live-quote
+        // settlement replay lives in Fork0xReplay.t.sol (run via
+        // script/fork-0x-replay.sh — needs --ffi + ZEROX_API_KEY). First green
+        // 2026-07-17 on the USDG→WETH pair. We assert the negative precondition
+        // (no AMM route configured) so the staged path is the only venue there.
         assertEq(engine.ammRouter(), address(0), "no AMM router in fork -> settlement unreachable");
         assertEq(engine.ammRoute(AAPL).length, 0, "no AMM route for AAPL");
-        console.log("DEFERRED: executeRebalance settlement needs a live 0x /quote replay script.");
+        console.log("Live settlement replay: see Fork0xReplay.t.sol / script/fork-0x-replay.sh.");
     }
 }
